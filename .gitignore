@@ -1,0 +1,8 @@
+build/
+*.o
+*.user
+*.app
+.DS_Store
+moc_*.cpp
+ui_*.h
+
