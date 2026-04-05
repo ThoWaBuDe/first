@@ -69,3 +69,4 @@ set_target_properties(LlamaQt PROPERTIES
 add_subdirectory(mcp-servers/filesystem)
 add_subdirectory(mcp-servers/sysinfo)
 add_subdirectory(mcp-servers/compile)
+add_subdirectory(mcp-servers/websearch)

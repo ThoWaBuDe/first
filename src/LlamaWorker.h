@@ -49,6 +49,10 @@ signals:
     // Wird nach vollständiger Antwort emittiert
     void generationDone(const QString &fullResponse);
 
+    // Statistik: promptTokens = Tokens im Prompt, ctxSize = n_ctx
+    // Wird einmal pro generate()-Aufruf nach dem Prompt-Processing emittiert.
+    void statsUpdate(int promptTokens, int ctxSize);
+
     // Fehlermeldung
     void errorOccurred(const QString &error);
 

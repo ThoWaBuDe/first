@@ -64,7 +64,7 @@ void LlamaWorker::initialize(const QString &modelPath)
 
     // ─── Kontext-Parameter ───────────────────────────────────────────────
     llama_context_params ctxParams = llama_context_default_params();
-    ctxParams.n_ctx    = 262144;   // Context-Window: 8K Tokens
+    ctxParams.n_ctx    = 128*1024;   // Context-Window: 8K Tokens
     ctxParams.n_batch  = 512;    // Tokens pro Batch beim Prompt-Processing
     ctxParams.n_ubatch = 512;    // Micro-Batch für CUDA
     // flash_attn_type ist ein enum in Build 8626+
@@ -96,7 +96,8 @@ void LlamaWorker::initialize(const QString &modelPath)
 
     // Temperatur 0.7: guter Mittelweg zwischen kreativ und kohärent
     llama_sampler_chain_add(AS_SAMPLER(m_sampler),
-        llama_sampler_init_temp(0.7f));
+                            llama_sampler_init_temp(0.2f));
+    //        llama_sampler_init_temp(0.7f));           // Alter Wert, Testweise auf 0.2 gesetzt.
 
     // Top-P 0.9: ignoriert die untersten 10% der Token-Wahrscheinlichkeiten
     llama_sampler_chain_add(AS_SAMPLER(m_sampler),
@@ -184,7 +185,10 @@ void LlamaWorker::generate(const QString &prompt)
         return;
     }
 
-    // Warnung wenn weniger als 10% des Context-Windows für Ausgabe bleiben
+    // Statistik an GUI senden: MainWindow zeigt Prompt-Tokens + Kontext-Auslastung
+    emit statsUpdate(nTokens, n_ctx);
+
+    // Warnung wenn weniger als 10% des Context-Windows fuer Ausgabe bleiben
     int remaining = n_ctx - nTokens;
     if (remaining < n_ctx / 10) {
         emit tokenGenerated(QString("[WARNUNG: Kontext fast voll: %1 Tokens verbleiben - Antwort abgeschnitten]\n").arg(remaining));

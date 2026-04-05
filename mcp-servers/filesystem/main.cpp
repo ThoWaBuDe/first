@@ -261,6 +261,26 @@ static std::pair<QString,bool> handleListSymbols(const QJsonObject &args)
     return {QString("Symbole in '%1':\n%2").arg(relPath).arg(symbols.join('\n')), false};
 }
 
+// ─── handleMkdir ─────────────────────────────────────────────────────────────
+// Erstellt ein Verzeichnis (inkl. alle Parent-Verzeichnisse — wie mkdir -p).
+static std::pair<QString,bool> handleMkdir(const QJsonObject &args)
+{
+    QString relPath = args.value("path").toString();
+    if (relPath.isEmpty()) return {"Fehler: 'path' fehlt.", true};
+
+    QString fullPath = resolvePath(relPath);
+    if (!isPathAllowed(fullPath))
+        return {QString("Fehler: Pfad ausserhalb Sandbox: %1").arg(relPath), true};
+
+    if (QDir(fullPath).exists())
+        return {QString("OK: '%1' existiert bereits.").arg(relPath), false};
+
+    if (QDir().mkpath(fullPath))
+        return {QString("OK: '%1' erstellt.").arg(relPath), false};
+
+    return {QString("Fehler: Konnte '%1' nicht erstellen.").arg(relPath), true};
+}
+
 // ─── Tool-Definitionen (advertised via tools/list) ───────────────────────────
 static QJsonArray makeToolList()
 {
@@ -326,6 +346,11 @@ static QJsonArray makeToolList()
             "Extrahiert C++ Klassen und Methoden aus einer Quelldatei. "
             "Gibt Zeilennummern zurueck - direkt verwendbar als start_line fuer read_file.",
             {{"path", makeProp("string","Relativer Pfad zur .h oder .cpp Datei")}},
+            {"path"}),
+
+        makeTool("mkdir",
+            "Erstellt ein Verzeichnis (inkl. Parent-Verzeichnisse, wie mkdir -p).",
+            {{"path", makeProp("string","Relativer Pfad des neuen Verzeichnisses")}},
             {"path"})
     };
 }
@@ -435,6 +460,7 @@ int main(int argc, char *argv[])
             else if (toolName == "str_replace")  result = handleStrReplace(toolArgs);
             else if (toolName == "list_dir")     result = handleListDir(toolArgs);
             else if (toolName == "list_symbols") result = handleListSymbols(toolArgs);
+            else if (toolName == "mkdir")        result = handleMkdir(toolArgs);
             else result = {QString("Unbekanntes Tool: '%1'").arg(toolName), true};
 
             sendResult(id, result.first, result.second);

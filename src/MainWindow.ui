@@ -3,137 +3,76 @@
  <class>MainWindow</class>
  <widget class="QMainWindow" name="MainWindow">
   <property name="geometry">
-   <rect>
-    <x>0</x>
-    <y>0</y>
-    <width>900</width>
-    <height>700</height>
-   </rect>
+   <rect><x>0</x><y>0</y><width>1200</width><height>750</height></rect>
   </property>
   <property name="windowTitle">
-   <string>LlamaQt — Qwen3.5-9B</string>
+   <string>LlamaQt</string>
   </property>
 
-  <!-- Zentrales Widget -->
+  <!-- Zentrales Widget: Chat -->
   <widget class="QWidget" name="centralWidget">
    <layout class="QVBoxLayout" name="mainLayout">
-    <property name="spacing">
-     <number>8</number>
-    </property>
-    <property name="leftMargin">
-     <number>12</number>
-    </property>
-    <property name="topMargin">
-     <number>12</number>
-    </property>
-    <property name="rightMargin">
-     <number>12</number>
-    </property>
-    <property name="bottomMargin">
-     <number>12</number>
-    </property>
+    <property name="spacing"><number>8</number></property>
+    <property name="leftMargin"><number>12</number></property>
+    <property name="topMargin"><number>12</number></property>
+    <property name="rightMargin"><number>12</number></property>
+    <property name="bottomMargin"><number>12</number></property>
 
-    <!-- Chat-Ansicht: QTextEdit ReadOnly, nimmt allen verfügbaren Platz -->
     <item>
      <widget class="QTextEdit" name="chatView">
-      <property name="readOnly">
-       <bool>true</bool>
-      </property>
-      <property name="acceptRichText">
-       <bool>true</bool>
-      </property>
-      <!-- sizePolicy: Expanding in beide Richtungen, stretch=1 -->
+      <property name="readOnly"><bool>true</bool></property>
+      <property name="acceptRichText"><bool>true</bool></property>
       <property name="sizePolicy">
        <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-        <horstretch>0</horstretch>
-        <verstretch>1</verstretch>
+        <horstretch>0</horstretch><verstretch>1</verstretch>
        </sizepolicy>
       </property>
      </widget>
     </item>
 
-    <!-- Status-Label -->
     <item>
      <widget class="QLabel" name="statusLabel">
-      <property name="text">
-       <string>Modell wird geladen...</string>
-      </property>
+      <property name="text"><string>Modell wird geladen...</string></property>
       <property name="sizePolicy">
        <sizepolicy hsizetype="Preferred" vsizetype="Fixed"/>
       </property>
      </widget>
     </item>
 
-    <!-- Eingabe-Zeile: Horizontal-Layout mit Input + Buttons -->
     <item>
      <layout class="QHBoxLayout" name="inputLayout">
-      <property name="spacing">
-       <number>6</number>
-      </property>
-
-      <!-- Texteingabe nimmt den verfügbaren Platz -->
+      <property name="spacing"><number>6</number></property>
       <item>
        <widget class="QLineEdit" name="inputLine">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
+        <property name="enabled"><bool>false</bool></property>
         <property name="placeholderText">
          <string>Nachricht eingeben... (Enter zum Senden)</string>
         </property>
         <property name="sizePolicy">
          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
-          <horstretch>1</horstretch>
-          <verstretch>0</verstretch>
+          <horstretch>1</horstretch><verstretch>0</verstretch>
          </sizepolicy>
         </property>
        </widget>
       </item>
-
-      <!-- Senden Button -->
       <item>
        <widget class="QPushButton" name="sendButton">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
-        <property name="text">
-         <string>Senden</string>
-        </property>
-        <property name="default">
-         <bool>true</bool>
-        </property>
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Fixed" vsizetype="Fixed"/>
-        </property>
+        <property name="enabled"><bool>false</bool></property>
+        <property name="text"><string>Senden</string></property>
+        <property name="default"><bool>true</bool></property>
        </widget>
       </item>
-
-      <!-- Stop Button -->
       <item>
        <widget class="QPushButton" name="stopButton">
-        <property name="enabled">
-         <bool>false</bool>
-        </property>
-        <property name="text">
-         <string>Stop</string>
-        </property>
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Fixed" vsizetype="Fixed"/>
-        </property>
+        <property name="enabled"><bool>false</bool></property>
+        <property name="text"><string>Stop</string></property>
        </widget>
       </item>
-
-      <!-- Löschen Button -->
       <item>
        <widget class="QPushButton" name="clearButton">
-        <property name="text">
-         <string>Loeschen</string>
-        </property>
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Fixed" vsizetype="Fixed"/>
-        </property>
+        <property name="text"><string>Loeschen</string></property>
        </widget>
       </item>
-
      </layout>
     </item>
 
@@ -141,15 +80,77 @@
   </widget>
   <!-- Ende centralWidget -->
 
+  <!-- QDockWidget: Tool-Calls, Thinking, Stats -->
+  <!-- Andockbar rechts, initial sichtbar -->
+  <widget class="QDockWidget" name="toolDock">
+   <attribute name="dockWidgetArea">
+    <number>2</number>
+   </attribute>
+   <property name="windowTitle"><string>Tools &amp; Thinking</string></property>
+   <property name="features">
+    <set>QDockWidget::DockWidgetFeature::DockWidgetClosable|QDockWidget::DockWidgetFeature::DockWidgetMovable|QDockWidget::DockWidgetFeature::DockWidgetFloatable</set>
+   </property>
+   <!-- Dock-Inhalt: Container-Widget mit VBoxLayout -->
+   <widget class="QWidget" name="dockContents">
+    <layout class="QVBoxLayout" name="dockLayout">
+     <property name="spacing"><number>6</number></property>
+     <property name="leftMargin"><number>6</number></property>
+     <property name="topMargin"><number>6</number></property>
+     <property name="rightMargin"><number>6</number></property>
+     <property name="bottomMargin"><number>6</number></property>
+
+     <!-- Stats-Zeile: Token-Zähler, Kontext-Auslastung -->
+     <item>
+      <widget class="QLabel" name="statsLabel">
+       <property name="text"><string>Tokens: 0 | Kontext: 0%</string></property>
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Preferred" vsizetype="Fixed"/>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignmentFlag::AlignLeft</set>
+       </property>
+      </widget>
+     </item>
+
+     <!-- Tool/Think-Ausgabe -->
+     <item>
+      <widget class="QTextEdit" name="toolView">
+       <property name="readOnly"><bool>true</bool></property>
+       <property name="acceptRichText"><bool>true</bool></property>
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
+         <horstretch>0</horstretch><verstretch>1</verstretch>
+        </sizepolicy>
+       </property>
+      </widget>
+     </item>
+
+     <!-- Dock-Buttons -->
+     <item>
+      <layout class="QHBoxLayout" name="dockButtonLayout">
+       <item>
+        <widget class="QPushButton" name="clearToolsButton">
+         <property name="text"><string>Leeren</string></property>
+        </widget>
+       </item>
+       <item>
+        <spacer name="dockSpacer">
+         <property name="orientation"><enum>Qt::Orientation::Horizontal</enum></property>
+         <property name="sizeHint" stdset="0">
+          <size><width>40</width><height>20</height></size>
+         </property>
+        </spacer>
+       </item>
+      </layout>
+     </item>
+
+    </layout>
+   </widget>
+  </widget>
+  <!-- Ende toolDock -->
+
  </widget>
- <!-- Ende QMainWindow -->
 
- <!-- uic generiert aus diesen Includes die nötigen Header -->
- <includes>
-  <include location="local">MainWindow.h</include>
- </includes>
-
- <!-- Tab-Reihenfolge für Keyboard-Navigation -->
  <tabstops>
   <tabstop>inputLine</tabstop>
   <tabstop>sendButton</tabstop>
@@ -157,7 +158,9 @@
   <tabstop>clearButton</tabstop>
   <tabstop>chatView</tabstop>
  </tabstops>
-
+ <includes>
+  <include location="local">MainWindow.h</include>
+ </includes>
  <resources/>
  <connections/>
 </ui>
