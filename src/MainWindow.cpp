@@ -17,11 +17,9 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
-    // QDockWidget rechts andocken
     addDockWidget(Qt::RightDockWidgetArea, ui->toolDock);
     ui->toolDock->setMinimumWidth(350);
 
-    // CSS: Chat-View
     ui->chatView->document()->setDefaultStyleSheet(R"(
         body      { font-family: 'Noto Sans', sans-serif; font-size: 13px; }
         .user     { color: #1a73e8; margin: 6px 0; }
@@ -31,7 +29,6 @@ MainWindow::MainWindow(QWidget *parent)
         b         { font-weight: 600; }
     )");
 
-    // CSS: Tool-View (monospace, kompakter)
     ui->toolView->document()->setDefaultStyleSheet(R"(
         body   { font-family: monospace; font-size: 11px; }
         .tool  { color: #188038; background: #f1f8f4;
@@ -48,12 +45,11 @@ MainWindow::MainWindow(QWidget *parent)
     ui->statusLabel->setStyleSheet("color: #888; font-size: 11px;");
     ui->statsLabel->setStyleSheet("color: #555; font-size: 11px; font-family: monospace;");
 
-    // Signals
-    connect(ui->inputLine,      &QLineEdit::returnPressed,  this, &MainWindow::onSendClicked);
-    connect(ui->sendButton,     &QPushButton::clicked,      this, &MainWindow::onSendClicked);
-    connect(ui->stopButton,     &QPushButton::clicked,      this, &MainWindow::onStopClicked);
-    connect(ui->clearButton,    &QPushButton::clicked,      this, &MainWindow::onClearClicked);
-    connect(ui->clearToolsButton,&QPushButton::clicked,     this, &MainWindow::onClearToolsClicked);
+    connect(ui->inputLine,       &QLineEdit::returnPressed,  this, &MainWindow::onSendClicked);
+    connect(ui->sendButton,      &QPushButton::clicked,      this, &MainWindow::onSendClicked);
+    connect(ui->stopButton,      &QPushButton::clicked,      this, &MainWindow::onStopClicked);
+    connect(ui->clearButton,     &QPushButton::clicked,      this, &MainWindow::onClearClicked);
+    connect(ui->clearToolsButton,&QPushButton::clicked,      this, &MainWindow::onClearToolsClicked);
 
     setupWorker();
 }
@@ -72,6 +68,11 @@ void MainWindow::setupWorker()
 {
     m_worker = new LlamaWorker();
     m_worker->moveToThread(&m_workerThread);
+
+    // SamplerProfile fuer QueuedConnection registrieren.
+    // Ohne das kann Qt den Typ nicht durch die Thread-Grenze transportieren.
+    // Muss vor dem ersten invokeMethod mit diesem Typ passieren.
+    qRegisterMetaType<LlamaWorker::SamplerProfile>();
 
     QString binDir = QCoreApplication::applicationDirPath();
     m_mcp.addServer(binDir + "/mcp-servers/filesystem/llamaqt-filesystem");
@@ -113,6 +114,9 @@ void MainWindow::onSendClicked()
 }
 
 // ─── sendMessage ─────────────────────────────────────────────────────────────
+// Startet eine neue Generierung — immer mit Chat-Profil.
+// Das Modell antwortet zunaechst frei; erst wenn ein Tool-Call erkannt wird,
+// schaltet onGenerationDone() auf Tool-Profil um.
 void MainWindow::sendMessage(const QString &userText)
 {
     m_chatModel.addUserMessage(userText);
@@ -121,52 +125,35 @@ void MainWindow::sendMessage(const QString &userText)
 
     m_currentResponse.clear();
     m_thinkBuffer.clear();
-    m_inThinkBlock  = false;
+    m_inThinkBlock    = false;
     m_generatedTokens = 0;
-    m_generating    = true;
+    m_generating      = true;
     setInputEnabled(false);
     ui->statusLabel->setText("Generiere...");
 
+    // Chat-Profil: erste Antwort auf eine User-Nachricht ist immer Chat.
     QMetaObject::invokeMethod(m_worker, "generate",
                               Qt::QueuedConnection,
-                              Q_ARG(QString, m_chatModel.buildPrompt()));
+                              Q_ARG(QString,                    m_chatModel.buildPrompt()),
+                              Q_ARG(LlamaWorker::SamplerProfile, LlamaWorker::SamplerProfile::Chat));
 }
 
 // ─── onTokenReceived ─────────────────────────────────────────────────────────
-// Thinking-Filter als einfache State-Machine mit 3 Zustaenden:
-//
-//   NORMAL    → Token direkt in chatView
-//   TAG_SCAN  → Puffer aufbauen bis Tag vollstaendig oder abgebrochen
-//   THINKING  → Token in m_thinkBuffer, NICHT in chatView
-//
-// Warum State-Machine statt lastIndexOf auf m_currentResponse?
-//   lastIndexOf findet den ersten <think> in der gesamten History — nach
-//   dem ersten Thinking-Block wuerde er immer wieder gefunden. State-Machine
-//   arbeitet nur auf dem aktuellen Zustand, kein Rueckblick noetig.
-//
-// Tags koennen ueber mehrere Tokens verteilt sein:
-//   Token 1: "<"   → TAG_SCAN Puffer: "<"
-//   Token 2: "think" → Puffer: "<think"
-//   Token 3: ">"   → Puffer: "<think>" → Match! → wechsel zu THINKING
-//   Kein Match nach MAX_TAG_LEN Zeichen → Puffer als Normal ausgeben.
+// Thinking-Filter als State-Machine (unveraendert).
 void MainWindow::onTokenReceived(const QString &token)
 {
     ++m_generatedTokens;
     ++m_totalTokens;
     m_currentResponse += token;
 
-    // Maximale Tag-Laenge: "</think>" = 8 Zeichen + Puffer
     static constexpr int MAX_TAG_LEN = 12;
 
     if (!m_inThinkBlock) {
-        // ─── Zustand NORMAL oder TAG_SCAN ────────────────────────────────
-        m_thinkBuffer += token;  // hier als temporaerer Tag-Scan-Puffer
+        m_thinkBuffer += token;
 
-        // Vollstaendiger Opening-Tag gefunden?
         if (m_thinkBuffer.endsWith("<think>")) {
-            // Alles VOR dem <think> in chatView ausgeben
             QString before = m_thinkBuffer;
-            before.chop(7);  // "<think>" entfernen
+            before.chop(7);
             if (!before.isEmpty()) {
                 QTextCursor cursor = ui->chatView->textCursor();
                 cursor.movePosition(QTextCursor::End);
@@ -175,11 +162,10 @@ void MainWindow::onTokenReceived(const QString &token)
                 sb->setValue(sb->maximum());
             }
             m_inThinkBlock = true;
-            m_thinkBuffer.clear();  // jetzt echter Think-Buffer
+            m_thinkBuffer.clear();
 
         } else if (m_thinkBuffer.length() > MAX_TAG_LEN ||
                    !QString("<think>").startsWith(m_thinkBuffer.right(MAX_TAG_LEN))) {
-            // Kein Tag im Anmarsch — Puffer ausgeben und leeren
             QTextCursor cursor = ui->chatView->textCursor();
             cursor.movePosition(QTextCursor::End);
             cursor.insertText(m_thinkBuffer);
@@ -187,16 +173,13 @@ void MainWindow::onTokenReceived(const QString &token)
             sb->setValue(sb->maximum());
             m_thinkBuffer.clear();
         }
-        // Sonst: Puffer wächst weiter (Tag noch unvollständig)
 
     } else {
-        // ─── Zustand THINKING ─────────────────────────────────────────────
         m_thinkBuffer += token;
 
-        // Closing-Tag vollstaendig?
         if (m_thinkBuffer.endsWith("</think>")) {
             QString thinkText = m_thinkBuffer;
-            thinkText.chop(8);  // "</think>" entfernen
+            thinkText.chop(8);
             thinkText = thinkText.trimmed();
 
             appendToTools(
@@ -205,22 +188,27 @@ void MainWindow::onTokenReceived(const QString &token)
 
             m_inThinkBlock = false;
             m_thinkBuffer.clear();
-            // Naechste Tokens gehen wieder in chatView (NORMAL-Zustand)
         }
     }
 
-    // Stats alle 10 Tokens aktualisieren
     if (m_generatedTokens % 10 == 0)
         updateStats();
 }
 
 // ─── onGenerationDone ────────────────────────────────────────────────────────
+// Profil-Logik:
+//   Fall A (Continuation):  Tool-Profil — das Modell soll ein abgebrochenes
+//                           JSON zu Ende schreiben.
+//   Fall B (Tool-Call):     nach Tool-Ergebnis → Tool-Profil, weil das Modell
+//                           entweder direkt antwortet oder einen naechsten
+//                           Tool-Call schreibt.
+//   Fall C (normale Antwort): kein weiterer generate()-Aufruf noetig.
 void MainWindow::onGenerationDone(const QString &fullResponse)
 {
     m_generating = false;
     updateStats();
 
-    // Fall A: offener Tool-Call → Continuation
+    // Fall A: offener Tool-Call → Continuation mit Tool-Profil
     if (fullResponse.contains("<tool_call>") && !fullResponse.contains("</tool_call>")) {
         ++m_continuationCount;
         if (m_continuationCount > MAX_CONTINUATIONS) {
@@ -234,10 +222,14 @@ void MainWindow::onGenerationDone(const QString &fullResponse)
         ui->statusLabel->setText(QString("Fortsetzung %1/%2...")
                                  .arg(m_continuationCount).arg(MAX_CONTINUATIONS));
         m_chatModel.addAssistantMessage(fullResponse);
-        m_generating = true;
+        m_generating      = true;
         m_generatedTokens = 0;
-        QMetaObject::invokeMethod(m_worker, "generate", Qt::QueuedConnection,
-                                  Q_ARG(QString, m_chatModel.buildPrompt()));
+
+        // Tool-Profil: das Modell soll das angefangene JSON praezise fortfuehren.
+        QMetaObject::invokeMethod(m_worker, "generate",
+                                  Qt::QueuedConnection,
+                                  Q_ARG(QString,                    m_chatModel.buildPrompt()),
+                                  Q_ARG(LlamaWorker::SamplerProfile, LlamaWorker::SamplerProfile::Tool));
         return;
     }
 
@@ -262,11 +254,11 @@ void MainWindow::onGenerationDone(const QString &fullResponse)
         QString     toolName = doc.object().value("name").toString();
         QJsonObject toolArgs = doc.object().value("arguments").toObject();
 
-        // Tool-Call im toolView anzeigen (Input)
         appendToTools(
             QString("<b>Tool-Call: %1</b><br><pre>%2</pre>")
             .arg(toolName.toHtmlEscaped(),
-                 QString::fromUtf8(QJsonDocument(toolArgs).toJson(QJsonDocument::Indented)).toHtmlEscaped()),
+                 QString::fromUtf8(QJsonDocument(toolArgs).toJson(QJsonDocument::Indented))
+                 .toHtmlEscaped()),
             "tool");
 
         if (!m_mcp.containsTool(toolName)) {
@@ -274,8 +266,11 @@ void MainWindow::onGenerationDone(const QString &fullResponse)
             m_chatModel.addToolResult(toolName,
                 QString("Fehler: Unbekanntes Tool '%1'.").arg(toolName));
             m_generating = true;
-            QMetaObject::invokeMethod(m_worker, "generate", Qt::QueuedConnection,
-                                      Q_ARG(QString, m_chatModel.buildPrompt()));
+            // Tool-Profil: Modell soll korrekten Tool-Namen waehlen.
+            QMetaObject::invokeMethod(m_worker, "generate",
+                                      Qt::QueuedConnection,
+                                      Q_ARG(QString,                    m_chatModel.buildPrompt()),
+                                      Q_ARG(LlamaWorker::SamplerProfile, LlamaWorker::SamplerProfile::Tool));
             return;
         }
 
@@ -286,14 +281,13 @@ void MainWindow::onGenerationDone(const QString &fullResponse)
                 QString toolResult = error.isEmpty() ? result : ("Fehler: " + error);
                 bool    isErr      = !error.isEmpty();
 
-                // Ergebnis im toolView
                 appendToTools(
                     QString("<b>Ergebnis [%1]:</b><br><pre>%2</pre>")
                     .arg(toolName.toHtmlEscaped(), toolResult.toHtmlEscaped()),
                     isErr ? "error" : "tool");
 
                 m_chatModel.addToolResult(toolName, toolResult);
-                m_generating = true;
+                m_generating      = true;
                 m_generatedTokens = 0;
                 ui->statusLabel->setText("Tool-Ergebnis verarbeiten...");
                 appendToChat("<b>Assistent:</b> ", "assistant");
@@ -301,21 +295,25 @@ void MainWindow::onGenerationDone(const QString &fullResponse)
                 m_thinkBuffer.clear();
                 m_inThinkBlock = false;
 
-                QMetaObject::invokeMethod(m_worker, "generate", Qt::QueuedConnection,
-                                          Q_ARG(QString, m_chatModel.buildPrompt()));
+                // Tool-Profil: nach Tool-Ergebnis erwartet man entweder
+                // einen naechsten Tool-Call oder eine abschliessende Antwort.
+                // Das Modell muss praezise auf das Ergebnis eingehen.
+                QMetaObject::invokeMethod(m_worker, "generate",
+                                          Qt::QueuedConnection,
+                                          Q_ARG(QString,                    m_chatModel.buildPrompt()),
+                                          Q_ARG(LlamaWorker::SamplerProfile, LlamaWorker::SamplerProfile::Tool));
             });
         return;
     }
 
-    // Fall C: normale Antwort
+    // Fall C: normale Antwort — kein generate() mehr noetig.
     m_chatModel.addAssistantMessage(fullResponse);
     setInputEnabled(true);
-    ui->statusLabel->setText(QString("Bereit"));
+    ui->statusLabel->setText("Bereit");
     ui->inputLine->setFocus();
 }
 
 // ─── onStatsUpdate ───────────────────────────────────────────────────────────
-// Empfängt promptTokens + ctxSize vom Worker nach jedem generate()-Aufruf.
 void MainWindow::onStatsUpdate(int promptTokens, int ctxSize)
 {
     m_promptTokens = promptTokens;
@@ -324,17 +322,14 @@ void MainWindow::onStatsUpdate(int promptTokens, int ctxSize)
 }
 
 // ─── updateStats ─────────────────────────────────────────────────────────────
-// Aktualisiert die Stats-Anzeige im Dock.
-// Berechnet Kontext-Auslastung in Prozent.
 void MainWindow::updateStats()
 {
     int used  = m_promptTokens + m_generatedTokens;
     int pct   = (m_ctxSize > 0) ? (used * 100 / m_ctxSize) : 0;
 
-    // Farbe je nach Auslastung: gruen → gelb → rot
-    QString color = "#188038";  // gruen
-    if (pct > 60) color = "#e37400";  // orange
-    if (pct > 85) color = "#c5221f";  // rot
+    QString color = "#188038";
+    if (pct > 60) color = "#e37400";
+    if (pct > 85) color = "#c5221f";
 
     ui->statsLabel->setText(
         QString("Prompt: %1 | Gen: %2 | Gesamt: %3 / %4 (%5%) | Total: %6")
@@ -386,7 +381,13 @@ void MainWindow::onModelLoaded()
     ui->statusLabel->setText("Modell geladen - bereit");
     appendToChat("Modell geladen: Qwen3.5-9B-Q6_K", "system");
 
-    // Tool-Uebersicht ins Dock
+    // Sampler-Profile in toolView anzeigen
+    appendToTools(
+        "<b>Sampler-Profile:</b><br>"
+        "&nbsp;Chat: Top-K 40 | Temp 0.7 | Top-P 0.95<br>"
+        "&nbsp;Tool: Top-K 20 | Temp 0.1 | Top-P 0.50",
+        "system");
+
     QString toolDebug = "<b>MCP Tools:</b><br>";
     int toolCount = 0;
     for (const auto &info : m_mcp.debugToolInfo()) {
@@ -415,7 +416,7 @@ void MainWindow::onError(const QString &error)
     ui->statusLabel->setText("Fehler");
 }
 
-// ─── appendToChat ─────────────────────────────────────────────────────────────
+// ─── appendToChat ────────────────────────────────────────────────────────────
 void MainWindow::appendToChat(const QString &text, const QString &cssClass)
 {
     ui->chatView->append(
@@ -427,8 +428,6 @@ void MainWindow::appendToTools(const QString &text, const QString &cssClass)
 {
     ui->toolView->append(
         QString(R"(<p class="%1">%2</p>)").arg(cssClass, text));
-
-    // Auto-Scroll im Tool-View
     QScrollBar *sb = ui->toolView->verticalScrollBar();
     sb->setValue(sb->maximum());
 }

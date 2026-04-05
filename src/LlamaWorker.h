@@ -1,80 +1,83 @@
 #pragma once
-#include <QThread>
+#include <QObject>
 #include <QString>
 #include <atomic>
 
 // ─── LlamaWorker ──────────────────────────────────────────────────────────────
-// Führt llama.cpp Inference in einem separaten Thread aus.
+// Fuehrt llama.cpp Inference in einem separaten Thread aus.
+// Pattern: Active Object — eigener Thread, async Kommunikation via Signals.
 //
-// WARUM ein eigener Thread?
-//   llama_decode() ist eine blocking-Funktion — sie läuft so lange bis alle
-//   Tokens generiert sind. Im GUI-Thread würde das die UI einfrieren.
-//   Der Worker-Thread generiert Token für Token und schickt jeden via Signal
-//   an den GUI-Thread. Das ist das klassische Producer/Consumer Pattern mit
-//   Qt Signals/Slots als thread-sichere Kommunikation.
+// ─── Zwei Sampler-Profile ─────────────────────────────────────────────────────
 //
-// Pattern: Active Object — ein Objekt das seine eigene Ausführungseinheit
-//          (Thread) besitzt und Anfragen asynchron abarbeitet.
+// Beide Sampler werden EINMALIG in initialize() gebaut und leben bis cleanup().
+// Vor jeder Generierung wird llama_sampler_reset() aufgerufen — das setzt
+// den internen Zustand aller Chain-Glieder zurueck:
+//   - Dist-RNG:           zurueck auf Seed-Zustand
+//   - Lazy-Grammar:       zurueck in "schlafend" (wartet auf Trigger-Pattern)
 //
-// Lebenszyklus:
-//   1. LlamaWorker erzeugen
-//   2. moveToThread(&m_thread) — Objekt lebt im Worker-Thread
-//   3. m_thread.start()
-//   4. generate() via Signal aufrufen → läuft im Worker-Thread
-//   5. tokenGenerated() Signals kommen im Worker-Thread an,
-//      Qt überträgt sie thread-sicher in den GUI-Thread
+// Chat-Profil (SamplerProfile::Chat):
+//   Top-K 40 → Temp 0.7 → Top-P 0.95 → Min-P 0.05 → Dist
+//   Breit, kreativ — fuer normale Konversation.
+//
+// Tool-Profil (SamplerProfile::Tool):
+//   Top-K 20 → Temp 0.1 → Top-P 0.50 → Min-P 0.05 → Dist → Lazy-Grammar
+//   Eng, deterministisch — fuer Tool-Calls und Code.
+//
+//   Lazy-Grammar: schlaeft bis "<tool_call>" im Stream erscheint,
+//   dann erzwingt sie gueltiges JSON fuer den Inhalt des Tool-Calls.
+//   Thinking (<think>...</think>) vor dem Tool-Call laeuft ungehindert durch.
+//   Pattern: Strategy mit Lazy Evaluation.
+//
+// Profilwechsel = Pointer-Swap auf m_sampler + reset() — kein Alloc/Free.
+// Pattern: Strategy — zwei austauschbare Algorithmen hinter einer Schnittstelle.
 class LlamaWorker : public QObject {
     Q_OBJECT
 
 public:
+    enum class SamplerProfile {
+        Chat,   // Temp 0.7, breit — normale Konversation
+        Tool    // Temp 0.1, eng + Lazy-Grammar — Tool-Calls und Code
+    };
+    Q_ENUM(SamplerProfile)
+
     explicit LlamaWorker(QObject *parent = nullptr);
     ~LlamaWorker() override;
 
 public slots:
-    // Initialisiert llama.cpp (Modell laden, Kontext erstellen).
-    // Muss als erstes aufgerufen werden.
     void initialize(const QString &modelPath);
 
-    // Startet Inference für den gegebenen Prompt.
-    // Emittiert tokenGenerated() für jeden Token, dann generationDone().
-    void generate(const QString &prompt);
+    void generate(const QString &prompt,
+                  LlamaWorker::SamplerProfile profile = LlamaWorker::SamplerProfile::Chat);
 
-    // Bricht laufende Generierung ab (thread-sicher via atomic flag)
     void stopGeneration();
 
 signals:
-    // Wird für jeden generierten Token emittiert (Streaming)
     void tokenGenerated(const QString &token);
-
-    // Wird nach vollständiger Antwort emittiert
     void generationDone(const QString &fullResponse);
-
-    // Statistik: promptTokens = Tokens im Prompt, ctxSize = n_ctx
-    // Wird einmal pro generate()-Aufruf nach dem Prompt-Processing emittiert.
     void statsUpdate(int promptTokens, int ctxSize);
-
-    // Fehlermeldung
     void errorOccurred(const QString &error);
-
-    // Modell erfolgreich geladen
     void modelLoaded();
 
 private:
-    // llama.cpp Handles — als void* damit der Header kein llama.h braucht
-    // (Forward-Declaration funktioniert bei typedef struct nicht direkt)
-    void *m_model   = nullptr;   // llama_model*
-    void *m_ctx     = nullptr;   // llama_context*
-    void *m_sampler = nullptr;   // llama_sampler*
+    void *m_model       = nullptr;  // llama_model*
+    void *m_ctx         = nullptr;  // llama_context*
 
-    // Atomic Flag für thread-sicheren Abbruch.
-    // std::atomic<bool> kann von einem anderen Thread gesetzt werden
-    // ohne Mutex — das ist genau der Anwendungsfall hier.
+    void *m_samplerChat = nullptr;  // llama_sampler* — dauerhaft, kein Grammar-Zustand
+    void *m_samplerTool = nullptr;  // llama_sampler* — dauerhaft, Lazy-Grammar
+
+    // Aktiver Zeiger — kein Owner, nie freigeben.
+    // Zeigt auf m_samplerChat oder m_samplerTool.
+    void *m_sampler     = nullptr;  // llama_sampler*
+
     std::atomic<bool> m_stopFlag{false};
-
     bool m_initialized = false;
 
-    // Hilfsfunktion: Token-ID → String
     QString tokenToString(int tokenId) const;
+    void    cleanup();
 
-    void cleanup();
+    // Factory Methods — geben llama_sampler* als void* zurueck.
+    void *buildChatSampler();
+    void *buildToolSampler();
 };
+
+Q_DECLARE_METATYPE(LlamaWorker::SamplerProfile)

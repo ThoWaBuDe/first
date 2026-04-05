@@ -18,9 +18,7 @@ void McpManager::addServer(const QString &binary, const QStringList &args)
 // ─── startAll ────────────────────────────────────────────────────────────────
 // Startet alle Server parallel. onAllReady wird aufgerufen wenn der letzte
 // fertig ist (oder fehlgeschlagen ist).
-//
 // Pattern: Scatter-Gather — alle gleichzeitig starten, auf alle warten.
-// Counter-Variable im Lambda-Capture zählt abwärts bis 0.
 void McpManager::startAll(std::function<void(bool, QStringList)> onAllReady)
 {
     if (m_servers.isEmpty()) {
@@ -28,21 +26,17 @@ void McpManager::startAll(std::function<void(bool, QStringList)> onAllReady)
         return;
     }
 
-    // Shared State zwischen den Lambdas: Zähler + Fehlerliste
-    // std::shared_ptr weil die Lambdas den Zähler outliven können
     auto remaining = std::make_shared<int>(m_servers.size());
     auto errors    = std::make_shared<QStringList>();
 
     for (int i = 0; i < m_servers.size(); ++i) {
         ServerEntry &entry = m_servers[i];
 
-        // McpClient im GUI-Thread — QProcess-Signals laufen in der Qt Event-Loop
         entry.client = new McpClient(this);
 
         connect(entry.client, &McpClient::serverDied,
                 this,         &McpManager::serverDied);
 
-        // Lambda captured: i (Index), remaining, errors, onAllReady
         entry.client->start(entry.binary, entry.args,
             [this, i, remaining, errors, onAllReady](bool ok, QString err) {
 
@@ -50,7 +44,6 @@ void McpManager::startAll(std::function<void(bool, QStringList)> onAllReady)
                 m_servers[i].error = err;
 
                 if (ok) {
-                    // Tool-Index aufbauen: Tool-Name → Server-Index
                     for (const QJsonValue &toolVal : m_servers[i].client->availableTools()) {
                         QString name = toolVal.toObject().value("name").toString();
                         m_toolIndex[name] = i;
@@ -61,7 +54,6 @@ void McpManager::startAll(std::function<void(bool, QStringList)> onAllReady)
 
                 --(*remaining);
                 if (*remaining == 0) {
-                    // Alle Server fertig → onAllReady aufrufen
                     bool allOk = errors->isEmpty();
                     onAllReady(allOk, *errors);
                 }
@@ -76,7 +68,6 @@ bool McpManager::containsTool(const QString &name) const
 }
 
 // ─── callTool ────────────────────────────────────────────────────────────────
-// Routing: Tool-Name → Server-Index → McpClient::callTool()
 void McpManager::callTool(const QString &name,
                            const QJsonObject &arguments,
                            ToolCallback callback)
@@ -100,8 +91,6 @@ void McpManager::callTool(const QString &name,
 
 // ─── buildToolsSystemPrompt ──────────────────────────────────────────────────
 // Baut den System-Prompt aus den advertisierten Tools aller Server.
-// Das ist der Kern des MCP-Vorteils: der Prompt wird dynamisch aus den
-// Server-Beschreibungen generiert — nicht hardcodiert.
 QString McpManager::buildToolsSystemPrompt() const
 {
     QString prompt = toolCallHeader();
@@ -128,27 +117,31 @@ QString McpManager::buildToolsSystemPrompt() const
 }
 
 // ─── toolCallHeader ──────────────────────────────────────────────────────────
+// Offizielles Qwen3 Hermes-Format fuer Tool-Calls.
+//
+// Qwen3 wurde auf genau diesen Wortlaut trainiert — je naeher der System-Prompt
+// am Trainingsformat liegt, desto zuverlaessiger haelt sich das Modell daran.
+//
+// Quelle: https://qwen.readthedocs.io/en/latest/framework/function_call.html
+// Format:
+//   <tool_call>
+//   {"name": <function-name>, "arguments": <args-json-object>}
+//   </tool_call>
 QString McpManager::toolCallHeader()
 {
     return
-        "Du hast Zugriff auf Tools. Rufe sie so auf:\n"
+        "You may call one or more functions to assist with the user query.\n\n"
+        "For each function call, return a json object with function name and "
+        "arguments within <tool_call></tool_call> XML tags:\n"
         "<tool_call>\n"
-        "{\"name\": \"TOOLNAME\", \"arguments\": {...}}\n"
+        "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
         "</tool_call>\n\n"
-        "Warte nach jedem Tool-Call auf das Ergebnis.\n"
-        "Verfuegbare Tools:\n";
+        "Wait for the result before making the next tool call.\n"
+        "Available tools:\n";
 }
 
 // ─── schemaToPrompt ──────────────────────────────────────────────────────────
 // Konvertiert ein JSON Schema in lesbaren Text fuer den System-Prompt.
-// Liest "description" und "properties" aus dem inputSchema.
-//
-// Beispiel Input (JSON Schema):
-//   {"type":"object","properties":{"path":{"type":"string","description":"Dateipfad"}}}
-//
-// Beispiel Output:
-//   Beschreibung: Liest eine Datei
-//   Argumente: path (string) - Dateipfad
 QString McpManager::schemaToPrompt(const QString &toolName,
                                     const QString &description,
                                     const QJsonObject &inputSchema)
@@ -159,7 +152,7 @@ QString McpManager::schemaToPrompt(const QString &toolName,
     if (!description.isEmpty())
         result += QString("   Beschreibung: %1\n").arg(description);
 
-    QJsonObject props = inputSchema.value("properties").toObject();
+    QJsonObject props   = inputSchema.value("properties").toObject();
     QJsonArray  required = inputSchema.value("required").toArray();
 
     if (!props.isEmpty()) {
@@ -170,7 +163,6 @@ QString McpManager::schemaToPrompt(const QString &toolName,
             QString type     = prop.value("type").toString("string");
             QString propDesc = prop.value("description").toString();
 
-            // Prüfen ob required
             bool isRequired = false;
             for (const QJsonValue &r : required)
                 if (r.toString() == propName) { isRequired = true; break; }
