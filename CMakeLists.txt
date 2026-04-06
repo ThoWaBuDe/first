@@ -3,9 +3,9 @@ project(LlamaQt VERSION 1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_AUTOMOC ON)      # Qt MOC (Meta-Object Compiler) — nötig für Q_OBJECT
-set(CMAKE_AUTOUIC ON)      # .ui Dateien → ui_*.h
-set(CMAKE_AUTORCC ON)      # .qrc Ressourcen
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTORCC ON)
 
 # ─── Qt6 ────────────────────────────────────────────────────────────────────
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
@@ -18,7 +18,8 @@ set(LLAMA_SRC_DIR   "$ENV{HOME}/ai/qLP"       CACHE PATH "llama.cpp source dir")
 set(SOURCES
     src/main.cpp
     src/MainWindow.cpp
-    src/Agent.cpp           # NEU: Agenten-Loop, Tool-Handling, Thinking-Filter
+    src/Agent.cpp
+    src/CommandProcessor.cpp   # NEU: Slash-Kommandos
     src/LlamaWorker.cpp
     src/McpClient.cpp
     src/McpManager.cpp
@@ -27,7 +28,8 @@ set(SOURCES
 
 set(HEADERS
     src/MainWindow.h
-    src/Agent.h             # NEU: MVP Presenter
+    src/Agent.h
+    src/CommandProcessor.h     # NEU
     src/LlamaWorker.h
     src/McpClient.h
     src/McpManager.h
@@ -40,9 +42,9 @@ add_executable(LlamaQt ${SOURCES} ${HEADERS}
 # ─── Include-Pfade ──────────────────────────────────────────────────────────
 target_include_directories(LlamaQt PRIVATE
     src/
-    ${LLAMA_SRC_DIR}/include          # llama.h
-    ${LLAMA_SRC_DIR}/ggml/include     # ggml.h
-    ${LLAMA_BUILD_DIR}/               # ggml-config.h (generiert)
+    ${LLAMA_SRC_DIR}/include
+    ${LLAMA_SRC_DIR}/ggml/include
+    ${LLAMA_BUILD_DIR}/
 )
 
 # ─── Libraries ──────────────────────────────────────────────────────────────
@@ -59,7 +61,6 @@ target_link_libraries(LlamaQt PRIVATE
     ${LLAMA_LIB}
 )
 
-# RPATH: libllama.so zur Laufzeit ohne LD_LIBRARY_PATH finden
 set_target_properties(LlamaQt PROPERTIES
     BUILD_RPATH "${LLAMA_BUILD_DIR};${LLAMA_BUILD_DIR}/src"
     INSTALL_RPATH "${LLAMA_BUILD_DIR};${LLAMA_BUILD_DIR}/src"

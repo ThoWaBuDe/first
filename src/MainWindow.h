@@ -1,5 +1,7 @@
 #pragma once
 #include <QMainWindow>
+#include <QScrollBar>
+#include <QEvent>
 #include "Agent.h"
 
 namespace Ui { class MainWindow; }
@@ -14,6 +16,12 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+    // eventFilter: Enter/Shift+Enter im inputEdit abfangen.
+    // Override von QObject::eventFilter() — muss im Header deklariert sein
+    // damit der Compiler die Methode als Override von QObject::eventFilter()
+    // erkennt und nicht als freie neue Methode.
+    bool eventFilter(QObject *obj, QEvent *event) override;
+
 private slots:
     // UI-Events
     void onSendClicked();
@@ -21,10 +29,7 @@ private slots:
 
     // Agent → UI
     void onAppendChat(const QString &html, const QString &cssClass);
-
-    // Token in laufenden Absatz einfügen (QTextCursor, kein neues <p>)
     void onAppendChatToken(const QString &text);
-
     void onAppendTools(const QString &html, const QString &cssClass);
     void onInputEnabled(bool enabled);
     void onStatsUpdated(int promptTokens, int generatedTokens,
@@ -34,9 +39,19 @@ private:
     void setupUi();
     void setupConnections();
 
+    // Smart-Autoscroll: true wenn Scrollbar am Ende (oder nah dran)
+    // Schwelle: 20px vom Maximum — fängt leichtes Überschiessen ab
+    bool isScrolledToBottom(QScrollBar *sb) const;
+
+    // Autoscroll wenn am Ende
+    void scrollToBottomIfNeeded(QScrollBar *sb);
+
     Ui::MainWindow *ui;
     Agent          *m_agent;
 
     static constexpr const char *MODEL_PATH =
         "/home/thomas/ai/models/Qwen3.5-9B-Q6_K.gguf";
+
+    // Schwelle in Pixel — innerhalb dieser Distanz zum Ende → Autoscroll
+    static constexpr int AUTOSCROLL_THRESHOLD = 20;
 };

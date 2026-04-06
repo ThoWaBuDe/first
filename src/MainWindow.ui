@@ -42,11 +42,15 @@
     <item>
      <layout class="QHBoxLayout" name="inputLayout">
       <property name="spacing"><number>6</number></property>
+
+      <!-- QTextEdit statt QLineEdit: Shift+Enter = Umbruch, Enter = Senden -->
+      <!-- fixedHeight wird in setupUi() gesetzt (ca. 3 Zeilen)             -->
       <item>
-       <widget class="QLineEdit" name="inputLine">
+       <widget class="QTextEdit" name="inputEdit">
         <property name="enabled"><bool>false</bool></property>
+        <property name="acceptRichText"><bool>false</bool></property>
         <property name="placeholderText">
-         <string>Nachricht eingeben... (Enter zum Senden)</string>
+         <string>Nachricht eingeben... (Enter = Senden, Shift+Enter = Zeilenumbruch)</string>
         </property>
         <property name="sizePolicy">
          <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
@@ -55,33 +59,38 @@
         </property>
        </widget>
       </item>
+
       <item>
-       <widget class="QPushButton" name="sendButton">
-        <property name="enabled"><bool>false</bool></property>
-        <property name="text"><string>Senden</string></property>
-        <property name="default"><bool>true</bool></property>
-       </widget>
+       <layout class="QVBoxLayout" name="buttonLayout">
+        <property name="spacing"><number>4</number></property>
+        <item>
+         <widget class="QPushButton" name="sendButton">
+          <property name="enabled"><bool>false</bool></property>
+          <property name="text"><string>Senden</string></property>
+          <property name="default"><bool>true</bool></property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="stopButton">
+          <property name="enabled"><bool>false</bool></property>
+          <property name="text"><string>Stop</string></property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="clearButton">
+          <property name="text"><string>Loeschen</string></property>
+         </widget>
+        </item>
+       </layout>
       </item>
-      <item>
-       <widget class="QPushButton" name="stopButton">
-        <property name="enabled"><bool>false</bool></property>
-        <property name="text"><string>Stop</string></property>
-       </widget>
-      </item>
-      <item>
-       <widget class="QPushButton" name="clearButton">
-        <property name="text"><string>Loeschen</string></property>
-       </widget>
-      </item>
+
      </layout>
     </item>
 
    </layout>
   </widget>
-  <!-- Ende centralWidget -->
 
   <!-- QDockWidget: Tool-Calls, Thinking, Stats -->
-  <!-- Andockbar rechts, initial sichtbar -->
   <widget class="QDockWidget" name="toolDock">
    <attribute name="dockWidgetArea">
     <number>2</number>
@@ -90,7 +99,6 @@
    <property name="features">
     <set>QDockWidget::DockWidgetFeature::DockWidgetClosable|QDockWidget::DockWidgetFeature::DockWidgetMovable|QDockWidget::DockWidgetFeature::DockWidgetFloatable</set>
    </property>
-   <!-- Dock-Inhalt: Container-Widget mit VBoxLayout -->
    <widget class="QWidget" name="dockContents">
     <layout class="QVBoxLayout" name="dockLayout">
      <property name="spacing"><number>6</number></property>
@@ -99,7 +107,6 @@
      <property name="rightMargin"><number>6</number></property>
      <property name="bottomMargin"><number>6</number></property>
 
-     <!-- Stats-Zeile: Token-Zähler, Kontext-Auslastung -->
      <item>
       <widget class="QLabel" name="statsLabel">
        <property name="text"><string>Tokens: 0 | Kontext: 0%</string></property>
@@ -112,7 +119,6 @@
       </widget>
      </item>
 
-     <!-- Tool/Think-Ausgabe -->
      <item>
       <widget class="QTextEdit" name="toolView">
        <property name="readOnly"><bool>true</bool></property>
@@ -125,7 +131,6 @@
       </widget>
      </item>
 
-     <!-- Dock-Buttons -->
      <item>
       <layout class="QHBoxLayout" name="dockButtonLayout">
        <item>
@@ -147,12 +152,11 @@
     </layout>
    </widget>
   </widget>
-  <!-- Ende toolDock -->
 
  </widget>
 
  <tabstops>
-  <tabstop>inputLine</tabstop>
+  <tabstop>inputEdit</tabstop>
   <tabstop>sendButton</tabstop>
   <tabstop>stopButton</tabstop>
   <tabstop>clearButton</tabstop>
