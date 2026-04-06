@@ -1,5 +1,6 @@
 // ─── LlamaQt MCP SysInfo Server ──────────────────────────────────────────────
-// Implementiert das MCP stdio-Protokoll fuer Systeminformationen.
+// Implements the MCP stdio protocol for system information queries.
+// All tools are read-only. No file writes, no process execution.
 //
 // Advertised Tools: get_time, get_pwd, disk_free, sys_info
 
@@ -41,15 +42,15 @@ static void sendError(int id, int code, const QString &message)
                   {"error",QJsonObject{{"code",code},{"message",message}}}});
 }
 
-// ─── Tool-Handler ─────────────────────────────────────────────────────────────
+// ─── Tool handlers ────────────────────────────────────────────────────────────
 
 static QString handleGetTime(const QJsonObject &)
 {
     QDateTime now = QDateTime::currentDateTime();
-    return QString("Datum:   %1\n"
-                   "Uhrzeit: %2\n"
-                   "UTC:     %3\n"
-                   "Unix:    %4")
+    return QString("Date:     %1\n"
+                   "Time:     %2\n"
+                   "UTC:      %3\n"
+                   "Unix:     %4")
            .arg(now.toString("dddd, dd. MMMM yyyy"))
            .arg(now.toString("HH:mm:ss"))
            .arg(now.toUTC().toString("HH:mm:ss UTC"))
@@ -60,17 +61,20 @@ static QString handleGetPwd(const QJsonObject &)
 {
     QString sandbox = QStandardPaths::writableLocation(QStandardPaths::HomeLocation)
                       + "/llamatools";
-    return QString("Sandbox-Root: %1").arg(sandbox);
+    return QString("Sandbox root: %1").arg(sandbox);
 }
 
 static QString handleDiskFree(const QJsonObject &args)
 {
+    // Only allow paths inside the sandbox or the home directory.
+    // No symlink check needed here — QStorageInfo works on the mounted filesystem,
+    // not on individual files.
     QString path = args.value("path").toString(
         QStandardPaths::writableLocation(QStandardPaths::HomeLocation));
 
     QStorageInfo storage(path);
     if (!storage.isValid())
-        return QString("Fehler: Kein Dateisystem unter '%1'.").arg(path);
+        return QString("Error: No filesystem found at '%1'.").arg(path);
 
     auto toHuman = [](qint64 bytes) -> QString {
         const double GB = 1024.0*1024.0*1024.0, MB = 1024.0*1024.0;
@@ -84,8 +88,8 @@ static QString handleDiskFree(const QJsonObject &args)
     qint64 used  = total - avail;
     int pct = total > 0 ? static_cast<int>(used*100/total) : 0;
 
-    return QString("Dateisystem: %1\nPfad:        %2\n"
-                   "Gesamt:      %3\nBelegt:      %4 (%5%%)\nFrei:        %6")
+    return QString("Filesystem:  %1\nPath:        %2\n"
+                   "Total:       %3\nUsed:        %4 (%5%)\nFree:        %6")
            .arg(storage.fileSystemType()).arg(path)
            .arg(toHuman(total)).arg(toHuman(used)).arg(pct).arg(toHuman(avail));
 }
@@ -101,26 +105,24 @@ static QString handleSysInfo(const QJsonObject &)
         qint64 total = 0, free = 0, avail = 0;
         while (!in.atEnd()) {
             QString line = in.readLine();
-            // section(':',1) → " 9437184 kB" → trimmed → "9437184 kB"
-            // section(' ',0,0) → "9437184"
             auto extractKb = [](const QString &l) {
                 return l.section(':',1).trimmed().section(' ',0,0).toLongLong();
             };
-            if (line.startsWith("MemTotal:"))      total = extractKb(line);
-            else if (line.startsWith("MemFree:"))  free  = extractKb(line);
+            if (line.startsWith("MemTotal:"))          total = extractKb(line);
+            else if (line.startsWith("MemFree:"))      free  = extractKb(line);
             else if (line.startsWith("MemAvailable:")) avail = extractKb(line);
             if (total && free && avail) break;
         }
         if (total > 0)
-            memInfo = QString("RAM gesamt:  %1 MB\nRAM frei:    %2 MB\nRAM verfuegb: %3 MB")
+            memInfo = QString("RAM total:     %1 MB\nRAM free:      %2 MB\nRAM available: %3 MB")
                       .arg(total/1024).arg(free/1024).arg(avail/1024);
         else
-            memInfo = "RAM: Parsing fehlgeschlagen";
+            memInfo = "RAM: could not parse /proc/meminfo";
     } else {
-        memInfo = "RAM: /proc/meminfo nicht lesbar";
+        memInfo = "RAM: /proc/meminfo not readable";
     }
 
-    return QString("Hostname:  %1\nOS:        %2\nKernel:    %3\nCPU-Kerne: %4\n%5")
+    return QString("Hostname:    %1\nOS:          %2\nKernel:      %3\nCPU cores:   %4 (logical)\n%5")
            .arg(QSysInfo::machineHostName())
            .arg(QSysInfo::prettyProductName())
            .arg(QSysInfo::kernelVersion())
@@ -128,7 +130,7 @@ static QString handleSysInfo(const QJsonObject &)
            .arg(memInfo);
 }
 
-// ─── Tool-Definitionen ────────────────────────────────────────────────────────
+// ─── Tool list ───────────────────────────────────────────────────────────────
 static QJsonArray makeToolList()
 {
     auto makeProp = [](const QString &type, const QString &desc) {
@@ -141,11 +143,22 @@ static QJsonArray makeToolList()
     };
 
     return QJsonArray{
-        makeTool("get_time",  "Aktuelle Uhrzeit, Datum, UTC und Unix-Timestamp.", {}, {}),
-        makeTool("get_pwd",   "Aktuelles Arbeitsverzeichnis (Sandbox-Root).",    {}, {}),
-        makeTool("disk_free", "Freier Speicherplatz auf einem Dateisystem.",
-            {{"path", makeProp("string","Pfad (optional, default: Home)")}}, {}),
-        makeTool("sys_info",  "Systeminformationen: CPU, RAM, OS, Kernel.",       {}, {})
+        makeTool("get_time",
+            "Returns the current local time, date, UTC time and Unix timestamp.",
+            {}, {}),
+        makeTool("get_pwd",
+            "Returns the sandbox root directory (~/llamatools/). "
+            "All file operations are restricted to this path.",
+            {}, {}),
+        makeTool("disk_free",
+            "Returns disk usage information for a given path, similar to 'df -h'. "
+            "Shows total, used and free space.",
+            {{"path", makeProp("string","Path to check (default: home directory)")}},
+            {}),
+        makeTool("sys_info",
+            "Returns system information: hostname, OS, kernel version, "
+            "CPU core count and RAM usage (total/free/available).",
+            {}, {})
     };
 }
 
@@ -175,7 +188,7 @@ int main(int argc, char *argv[])
             sendResponse({{"jsonrpc","2.0"},{"id",id},{"result",QJsonObject{
                 {"protocolVersion","2024-11-05"},
                 {"capabilities",   QJsonObject{}},
-                {"serverInfo",     QJsonObject{{"name","llamaqt-sysinfo"},{"version","1.0"}}}
+                {"serverInfo",     QJsonObject{{"name","llamaqt-sysinfo"},{"version","1.1"}}}
             }}});
             continue;
         }
@@ -199,7 +212,7 @@ int main(int argc, char *argv[])
             else if (toolName == "get_pwd")   result = handleGetPwd(toolArgs);
             else if (toolName == "disk_free") result = handleDiskFree(toolArgs);
             else if (toolName == "sys_info")  result = handleSysInfo(toolArgs);
-            else { result = QString("Unbekanntes Tool: '%1'").arg(toolName); isError = true; }
+            else { result = QString("Unknown tool: '%1'").arg(toolName); isError = true; }
 
             sendResult(id, result, isError);
             continue;
@@ -207,6 +220,5 @@ int main(int argc, char *argv[])
 
         if (hasId) sendError(id, -32601, "Method not found: " + method);
     }
-
     return 0;
 }

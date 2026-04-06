@@ -1,12 +1,20 @@
 // ─── LlamaQt MCP Filesystem Server ───────────────────────────────────────────
-// Implementiert das MCP stdio-Protokoll für Dateioperationen.
+// Implements the MCP stdio protocol for file operations inside a sandbox.
 //
-// Transport: newline-delimited JSON über stdin/stdout.
-// Der Client (McpClient) startet diesen Prozess via QProcess und kommuniziert
-// über die Standard-Streams. Kein TCP, kein HTTP.
+// Transport: newline-delimited JSON over stdin/stdout.
+// The client (McpClient) launches this process via QProcess and communicates
+// over standard streams. No TCP, no HTTP.
+//
+// Security model:
+//   - All paths are resolved relative to ~/llamatools/ (sandbox root)
+//   - Absolute paths are rejected unless they start with the sandbox root
+//   - Symlinks are NEVER followed — a symlink inside the sandbox could point
+//     to /etc/passwd or any sensitive file outside the sandbox.
+//     Every path component is checked with QFileInfo::isSymLink().
 //
 // Advertised Tools:
-//   read_file, write_file, append_file, str_replace, list_dir, list_symbols
+//   read_file, write_file, append_file, str_replace, list_dir,
+//   list_symbols, mkdir
 
 #include <QCoreApplication>
 #include <QJsonDocument>
@@ -36,33 +44,107 @@ static QString resolvePath(const QString &rel)
     return sandboxRoot() + "/" + rel;
 }
 
-static bool isPathAllowed(const QString &path)
+// ─── isSymlinkInPath ─────────────────────────────────────────────────────────
+// Checks every component of the path for symlinks.
+//
+// Why check every component and not just the final path?
+// A symlink can appear at any level:
+//   ~/llamatools/subdir -> /etc/        (directory symlink)
+//   ~/llamatools/subdir/passwd          (now reads /etc/passwd)
+//
+// QFileInfo::isSymLink() checks only the final component. We walk the full
+// path component by component so no intermediate symlink is missed.
+//
+// Returns true if any component is a symlink (= path is unsafe).
+static bool isSymlinkInPath(const QString &absolutePath)
 {
-    QFileInfo fi(path);
-    QString abs = fi.absoluteFilePath();
-    QString absDir = fi.absolutePath();
-    return abs.startsWith(sandboxRoot()) || absDir.startsWith(sandboxRoot());
+    // Walk from root to the full path, checking each prefix.
+    // Example: /home/thomas/llamatools/sub/file
+    //   checks: /home
+    //           /home/thomas
+    //           /home/thomas/llamatools
+    //           /home/thomas/llamatools/sub
+    //           /home/thomas/llamatools/sub/file
+    QStringList parts = absolutePath.split('/', Qt::SkipEmptyParts);
+    QString current;
+    for (const QString &part : parts) {
+        current += "/" + part;
+        QFileInfo fi(current);
+        if (fi.isSymLink())
+            return true;
+    }
+    return false;
 }
 
-// ─── Tool-Handler ─────────────────────────────────────────────────────────────
+// ─── isPathAllowed ────────────────────────────────────────────────────────────
+// Two checks:
+//   1. The resolved absolute path must be inside the sandbox root.
+//   2. No symlink anywhere in the path.
+static bool isPathAllowed(const QString &path, QString &reason)
+{
+    QFileInfo fi(path);
+    QString absPath = fi.absoluteFilePath();
+    QString absDir  = fi.absolutePath();
 
+    if (!absPath.startsWith(sandboxRoot()) && !absDir.startsWith(sandboxRoot())) {
+        reason = QString("Path outside sandbox: %1").arg(path);
+        return false;
+    }
+
+    if (isSymlinkInPath(absPath)) {
+        reason = QString("Symlink detected in path — following symlinks is "
+                         "not allowed (potential sandbox escape): %1").arg(path);
+        return false;
+    }
+
+    return true;
+}
+
+// ─── Limits ──────────────────────────────────────────────────────────────────
 static constexpr int MAX_READ_CHARS  = 4096;
 static constexpr int MAX_WRITE_CHARS = 8192;
 static constexpr int MAX_LINES_READ  = 200;
 
-// Gibt {result, isError} zurück
+// ─── JSON-RPC helpers ────────────────────────────────────────────────────────
+static void sendResponse(const QJsonObject &msg)
+{
+    QByteArray line = QJsonDocument(msg).toJson(QJsonDocument::Compact) + "\n";
+    std::cout << line.toStdString();
+    std::cout.flush();
+}
+
+static void sendResult(int id, const QString &text, bool isError = false)
+{
+    sendResponse({
+        {"jsonrpc","2.0"}, {"id",id},
+        {"result", QJsonObject{
+            {"content", QJsonArray{QJsonObject{{"type","text"},{"text",text}}}},
+            {"isError", isError}
+        }}
+    });
+}
+
+static void sendError(int id, int code, const QString &message)
+{
+    sendResponse({{"jsonrpc","2.0"},{"id",id},
+                  {"error",QJsonObject{{"code",code},{"message",message}}}});
+}
+
+// ─── Tool handlers ───────────────────────────────────────────────────────────
+
 static std::pair<QString,bool> handleReadFile(const QJsonObject &args)
 {
     QString relPath = args.value("path").toString();
-    if (relPath.isEmpty()) return {"Fehler: 'path' fehlt.", true};
+    if (relPath.isEmpty()) return {"Error: 'path' is required.", true};
 
     QString fullPath = resolvePath(relPath);
-    if (!isPathAllowed(fullPath))
-        return {QString("Fehler: Pfad ausserhalb Sandbox: %1").arg(relPath), true};
+    QString reason;
+    if (!isPathAllowed(fullPath, reason))
+        return {reason, true};
 
     QFile file(fullPath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return {QString("Fehler: Datei nicht lesbar: %1").arg(relPath), true};
+        return {QString("Error: Cannot open file: %1").arg(relPath), true};
 
     bool hasRange  = args.contains("start_line");
     int  startLine = args.value("start_line").toInt(1);
@@ -76,7 +158,7 @@ static std::pair<QString,bool> handleReadFile(const QJsonObject &args)
 
     if (hasRange) {
         int currentLine = 0;
-        result += QString("// %1 [Zeilen %2-%3]\n").arg(relPath).arg(startLine).arg(endLine);
+        result += QString("// %1 [lines %2-%3]\n").arg(relPath).arg(startLine).arg(endLine);
         while (!in.atEnd()) {
             ++currentLine;
             QString line = in.readLine();
@@ -85,7 +167,7 @@ static std::pair<QString,bool> handleReadFile(const QJsonObject &args)
             if (currentLine > endLine) break;
         }
         if (currentLine < startLine)
-            return {QString("Fehler: Datei hat nur %1 Zeilen.").arg(currentLine), true};
+            return {QString("Error: File has only %1 lines.").arg(currentLine), true};
     } else {
         result = in.readAll();
         if (result.length() > MAX_READ_CHARS) {
@@ -93,7 +175,8 @@ static std::pair<QString,bool> handleReadFile(const QJsonObject &args)
             if (cut < 0) cut = MAX_READ_CHARS;
             int lines = result.left(cut).count('\n') + 1;
             result = result.left(cut);
-            result += QString("\n[... abgeschnitten. Weiter mit start_line=%1]").arg(lines + 1);
+            result += QString("\n[... truncated. Continue reading with start_line=%1]")
+                      .arg(lines + 1);
         }
     }
     return {result, false};
@@ -103,51 +186,52 @@ static std::pair<QString,bool> handleWriteFile(const QJsonObject &args)
 {
     QString relPath = args.value("path").toString();
     QString content = args.value("content").toString();
-    if (relPath.isEmpty()) return {"Fehler: 'path' fehlt.", true};
+    if (relPath.isEmpty()) return {"Error: 'path' is required.", true};
     if (content.length() > MAX_WRITE_CHARS)
-        return {QString("Fehler: content zu gross (%1 Zeichen, max %2). "
-                        "Verwende str_replace oder append_file.")
+        return {QString("Error: content too large (%1 chars, max %2). "
+                        "Use str_replace or append_file instead.")
                 .arg(content.length()).arg(MAX_WRITE_CHARS), true};
 
     QString fullPath = resolvePath(relPath);
-    if (!isPathAllowed(fullPath))
-        return {QString("Fehler: Pfad ausserhalb Sandbox."), true};
+    QString reason;
+    if (!isPathAllowed(fullPath, reason))
+        return {reason, true};
 
     QFileInfo fi(fullPath);
     QDir().mkpath(fi.absolutePath());
 
     QFile file(fullPath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-        return {QString("Fehler: Datei nicht schreibbar: %1").arg(relPath), true};
+        return {QString("Error: Cannot write file: %1").arg(relPath), true};
 
     QTextStream(&file) << content;
-    return {QString("OK: %1 Bytes in '%2' geschrieben.").arg(content.length()).arg(relPath), false};
+    return {QString("OK: %1 bytes written to '%2'.").arg(content.length()).arg(relPath), false};
 }
 
 static std::pair<QString,bool> handleAppendFile(const QJsonObject &args)
 {
     QString relPath = args.value("path").toString();
     QString content = args.value("content").toString();
-    if (relPath.isEmpty()) return {"Fehler: 'path' fehlt.", true};
+    if (relPath.isEmpty()) return {"Error: 'path' is required.", true};
     if (content.length() > MAX_WRITE_CHARS)
-        return {QString("Fehler: content zu gross (%1 Zeichen, max %2).")
+        return {QString("Error: content too large (%1 chars, max %2).")
                 .arg(content.length()).arg(MAX_WRITE_CHARS), true};
 
     QString fullPath = resolvePath(relPath);
-    if (!isPathAllowed(fullPath))
-        return {"Fehler: Pfad ausserhalb Sandbox.", true};
+    QString reason;
+    if (!isPathAllowed(fullPath, reason))
+        return {reason, true};
 
     QFileInfo fi(fullPath);
     QDir().mkpath(fi.absolutePath());
 
-    // QIODevice::Append: schreibt ans Ende ohne bestehenden Inhalt zu loeschen
     QFile file(fullPath);
     if (!file.open(QIODevice::Append | QIODevice::Text))
-        return {QString("Fehler: Datei nicht appendierbar: %1").arg(relPath), true};
+        return {QString("Error: Cannot append to file: %1").arg(relPath), true};
 
     QTextStream(&file) << content;
     qint64 totalSize = file.size();
-    return {QString("OK: %1 Bytes an '%2' angehaengt (Gesamt: %3 Bytes).")
+    return {QString("OK: %1 bytes appended to '%2' (total: %3 bytes).")
             .arg(content.length()).arg(relPath).arg(totalSize), false};
 }
 
@@ -156,16 +240,17 @@ static std::pair<QString,bool> handleStrReplace(const QJsonObject &args)
     QString relPath = args.value("path").toString();
     QString oldStr  = args.value("old_str").toString();
     QString newStr  = args.value("new_str").toString();
-    if (relPath.isEmpty()) return {"Fehler: 'path' fehlt.", true};
-    if (oldStr.isEmpty())  return {"Fehler: 'old_str' fehlt.", true};
+    if (relPath.isEmpty()) return {"Error: 'path' is required.", true};
+    if (oldStr.isEmpty())  return {"Error: 'old_str' is required.", true};
 
     QString fullPath = resolvePath(relPath);
-    if (!isPathAllowed(fullPath))
-        return {"Fehler: Pfad ausserhalb Sandbox.", true};
+    QString reason;
+    if (!isPathAllowed(fullPath, reason))
+        return {reason, true};
 
     QFile file(fullPath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return {QString("Fehler: Datei nicht lesbar: %1").arg(relPath), true};
+        return {QString("Error: Cannot read file: %1").arg(relPath), true};
     QString content = QTextStream(&file).readAll();
     file.close();
 
@@ -173,18 +258,18 @@ static std::pair<QString,bool> handleStrReplace(const QJsonObject &args)
     while ((pos = content.indexOf(oldStr, pos)) != -1) { ++count; pos += oldStr.length(); }
 
     if (count == 0)
-        return {QString("Fehler: 'old_str' nicht gefunden in '%1'.").arg(relPath), true};
+        return {QString("Error: 'old_str' not found in '%1'.").arg(relPath), true};
     if (count > 1)
-        return {QString("Fehler: 'old_str' %1x gefunden - nicht eindeutig. "
-                        "Mehr Kontext angeben.").arg(count), true};
+        return {QString("Error: 'old_str' found %1 times in '%2' — not unique. "
+                        "Add more surrounding context.").arg(count).arg(relPath), true};
 
     content.replace(oldStr, newStr);
 
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
-        return {QString("Fehler: Datei nicht schreibbar."), true};
+        return {"Error: Cannot write file.", true};
     QTextStream(&file) << content;
 
-    return {QString("OK: %1 Zeile(n) ersetzt durch %2 in '%3'.")
+    return {QString("OK: replaced %1 line(s) with %2 line(s) in '%3'.")
             .arg(oldStr.count('\n')+1).arg(newStr.count('\n')+1).arg(relPath), false};
 }
 
@@ -192,22 +277,34 @@ static std::pair<QString,bool> handleListDir(const QJsonObject &args)
 {
     QString relPath  = args.value("path").toString(".");
     QString fullPath = resolvePath(relPath);
-    if (!isPathAllowed(fullPath)) return {"Fehler: Pfad ausserhalb Sandbox.", true};
+    QString reason;
+    if (!isPathAllowed(fullPath, reason)) return {reason, true};
 
     QDir dir(fullPath);
-    if (!dir.exists()) return {QString("Fehler: Verzeichnis existiert nicht."), true};
+    if (!dir.exists()) return {"Error: Directory does not exist.", true};
 
     QStringList entries = dir.entryList(QDir::AllEntries | QDir::NoDotAndDotDot,
                                         QDir::Name | QDir::DirsFirst);
-    if (entries.isEmpty()) return {"(leer)", false};
+    if (entries.isEmpty()) return {"(empty)", false};
 
     QStringList result;
     for (const QString &name : entries) {
-        QFileInfo fi(fullPath + "/" + name);
-        result << QString("%1 %2%3")
-                  .arg(fi.isDir() ? "[D]" : "[F]")
-                  .arg(name)
-                  .arg(fi.isFile() ? QString(" (%1 Bytes)").arg(fi.size()) : QString());
+        QString entryPath = fullPath + "/" + name;
+        QFileInfo fi(entryPath);
+
+        // Mark symlinks explicitly — never follow them silently
+        QString typeTag;
+        if (fi.isSymLink())       typeTag = "[L]";  // symlink — do not use
+        else if (fi.isDir())      typeTag = "[D]";
+        else                      typeTag = "[F]";
+
+        QString extra;
+        if (fi.isSymLink())
+            extra = QString(" -> %1 (symlink, access denied)").arg(fi.symLinkTarget());
+        else if (fi.isFile())
+            extra = QString(" (%1 bytes)").arg(fi.size());
+
+        result << QString("%1 %2%3").arg(typeTag, name, extra);
     }
     return {result.join('\n'), false};
 }
@@ -215,14 +312,15 @@ static std::pair<QString,bool> handleListDir(const QJsonObject &args)
 static std::pair<QString,bool> handleListSymbols(const QJsonObject &args)
 {
     QString relPath = args.value("path").toString();
-    if (relPath.isEmpty()) return {"Fehler: 'path' fehlt.", true};
+    if (relPath.isEmpty()) return {"Error: 'path' is required.", true};
 
     QString fullPath = resolvePath(relPath);
-    if (!isPathAllowed(fullPath)) return {"Fehler: Pfad ausserhalb Sandbox.", true};
+    QString reason;
+    if (!isPathAllowed(fullPath, reason)) return {reason, true};
 
     QFile file(fullPath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
-        return {QString("Fehler: Datei nicht lesbar: %1").arg(relPath), true};
+        return {QString("Error: Cannot read file: %1").arg(relPath), true};
 
     QTextStream in(&file);
     QStringList symbols;
@@ -257,144 +355,112 @@ static std::pair<QString,bool> handleListSymbols(const QJsonObject &args)
     }
 
     if (symbols.isEmpty())
-        return {QString("Keine Symbole in '%1'.").arg(relPath), false};
-    return {QString("Symbole in '%1':\n%2").arg(relPath).arg(symbols.join('\n')), false};
+        return {QString("No symbols found in '%1'.").arg(relPath), false};
+    return {QString("Symbols in '%1':\n%2").arg(relPath).arg(symbols.join('\n')), false};
 }
 
-// ─── handleMkdir ─────────────────────────────────────────────────────────────
-// Erstellt ein Verzeichnis (inkl. alle Parent-Verzeichnisse — wie mkdir -p).
 static std::pair<QString,bool> handleMkdir(const QJsonObject &args)
 {
     QString relPath = args.value("path").toString();
-    if (relPath.isEmpty()) return {"Fehler: 'path' fehlt.", true};
+    if (relPath.isEmpty()) return {"Error: 'path' is required.", true};
 
     QString fullPath = resolvePath(relPath);
-    if (!isPathAllowed(fullPath))
-        return {QString("Fehler: Pfad ausserhalb Sandbox: %1").arg(relPath), true};
+    QString reason;
+    if (!isPathAllowed(fullPath, reason))
+        return {reason, true};
 
     if (QDir(fullPath).exists())
-        return {QString("OK: '%1' existiert bereits.").arg(relPath), false};
+        return {QString("OK: '%1' already exists.").arg(relPath), false};
 
     if (QDir().mkpath(fullPath))
-        return {QString("OK: '%1' erstellt.").arg(relPath), false};
+        return {QString("OK: directory '%1' created.").arg(relPath), false};
 
-    return {QString("Fehler: Konnte '%1' nicht erstellen.").arg(relPath), true};
+    return {QString("Error: Could not create '%1'.").arg(relPath), true};
 }
 
-// ─── Tool-Definitionen (advertised via tools/list) ───────────────────────────
+// ─── Tool list ───────────────────────────────────────────────────────────────
 static QJsonArray makeToolList()
 {
     auto makeProp = [](const QString &type, const QString &desc) {
         return QJsonObject{{"type", type}, {"description", desc}};
     };
-
     auto makeTool = [](const QString &name, const QString &desc,
                        const QJsonObject &props,
                        const QJsonArray &required = {}) {
         return QJsonObject{
-            {"name", name},
-            {"description", desc},
+            {"name", name}, {"description", desc},
             {"inputSchema", QJsonObject{
-                {"type", "object"},
-                {"properties", props},
-                {"required", required}
+                {"type","object"}, {"properties", props}, {"required", required}
             }}
         };
     };
 
     return QJsonArray{
         makeTool("read_file",
-            "Liest eine Datei (optional nur einen Zeilenbereich). "
-            "Ohne Range max 4096 Zeichen. Mit Range max 200 Zeilen. "
-            "Bei [abgeschnitten] weiter lesen mit start_line=N.",
-            {{"path",       makeProp("string", "Relativer Pfad zur Sandbox")},
-             {"start_line", makeProp("integer","Erste Zeile (1-basiert, optional)")},
-             {"end_line",   makeProp("integer","Letzte Zeile (optional)")}},
+            "Read a file from the sandbox (~/llamatools/). "
+            "Optionally read only a line range. "
+            "Without range: max 4096 chars. With range: max 200 lines. "
+            "If output is truncated, use start_line to continue. "
+            "Symlinks are rejected for security.",
+            {{"path",       makeProp("string",  "Path relative to sandbox root")},
+             {"start_line", makeProp("integer", "First line to read (1-based, optional)")},
+             {"end_line",   makeProp("integer", "Last line to read (optional)")}},
             {"path"}),
 
         makeTool("write_file",
-            "Schreibt/ueberschreibt eine Datei. Max 8192 Zeichen. "
-            "Fuer Aenderungen str_replace bevorzugen. "
-            "Fuer grosse Dateien: write_file + append_file.",
-            {{"path",    makeProp("string","Relativer Pfad")},
-             {"content", makeProp("string","Dateiinhalt")}},
+            "Write or overwrite a file in the sandbox. Max 8192 chars. "
+            "Prefer str_replace for editing existing files. "
+            "For large files: write_file + append_file in chunks. "
+            "Symlinks are rejected.",
+            {{"path",    makeProp("string", "Path relative to sandbox root")},
+             {"content", makeProp("string", "File content")}},
             {"path","content"}),
 
         makeTool("append_file",
-            "Haengt Text an eine bestehende Datei an (oder erstellt sie neu). "
-            "Max 8192 Zeichen pro Aufruf. Ideal fuer grosse Dateien in Bloecken.",
-            {{"path",    makeProp("string","Relativer Pfad")},
-             {"content", makeProp("string","Anzuhaengender Inhalt")}},
+            "Append text to an existing file (or create it). Max 8192 chars per call. "
+            "Useful for writing large files in chunks. Symlinks are rejected.",
+            {{"path",    makeProp("string", "Path relative to sandbox root")},
+             {"content", makeProp("string", "Content to append")}},
             {"path","content"}),
 
         makeTool("str_replace",
-            "Ersetzt einen eindeutigen Textblock in einer Datei. "
-            "old_str muss GENAU EINMAL vorkommen. "
-            "Bevorzugtes Tool fuer Aenderungen an bestehenden Dateien. "
-            "new_str darf leer sein (= Loeschen).",
-            {{"path",    makeProp("string","Relativer Pfad")},
-             {"old_str", makeProp("string","Zu ersetzender Text (eindeutig!)")},
-             {"new_str", makeProp("string","Ersatztext (leer = loeschen)")}},
+            "Replace a unique text block in a file. "
+            "old_str must appear EXACTLY ONCE in the file — otherwise an error is returned. "
+            "Preferred tool for editing existing files. "
+            "Set new_str to empty string to delete. Symlinks are rejected.",
+            {{"path",    makeProp("string", "Path relative to sandbox root")},
+             {"old_str", makeProp("string", "Text to replace (must be unique in file)")},
+             {"new_str", makeProp("string", "Replacement text (empty = delete)")}},
             {"path","old_str"}),
 
         makeTool("list_dir",
-            "Listet Dateien und Verzeichnisse auf.",
-            {{"path", makeProp("string","Relativer Pfad (default: Sandbox-Root)")}},
+            "List files and directories in the sandbox. "
+            "Symlinks are shown as [L] and their targets are not accessible.",
+            {{"path", makeProp("string", "Path relative to sandbox root (default: root)")}},
             {}),
 
         makeTool("list_symbols",
-            "Extrahiert C++ Klassen und Methoden aus einer Quelldatei. "
-            "Gibt Zeilennummern zurueck - direkt verwendbar als start_line fuer read_file.",
-            {{"path", makeProp("string","Relativer Pfad zur .h oder .cpp Datei")}},
+            "Extract C++ classes and methods from a source file. "
+            "Returns line numbers usable as start_line for read_file. "
+            "Useful for navigation before reading a specific function.",
+            {{"path", makeProp("string", "Path to .h or .cpp file")}},
             {"path"}),
 
         makeTool("mkdir",
-            "Erstellt ein Verzeichnis (inkl. Parent-Verzeichnisse, wie mkdir -p).",
-            {{"path", makeProp("string","Relativer Pfad des neuen Verzeichnisses")}},
+            "Create a directory including all parent directories (like mkdir -p). "
+            "Symlinks in the path are rejected.",
+            {{"path", makeProp("string", "Path relative to sandbox root")}},
             {"path"})
     };
-}
-
-// ─── JSON-RPC Hilfsfunktionen ─────────────────────────────────────────────────
-
-static void sendResponse(const QJsonObject &msg)
-{
-    QByteArray line = QJsonDocument(msg).toJson(QJsonDocument::Compact) + "\n";
-    std::cout << line.toStdString();
-    std::cout.flush();
-}
-
-static void sendResult(int id, const QString &text, bool isError = false)
-{
-    QJsonObject result{
-        {"content", QJsonArray{QJsonObject{{"type","text"},{"text",text}}}},
-        {"isError", isError}
-    };
-    sendResponse({{"jsonrpc","2.0"},{"id",id},{"result",result}});
-}
-
-static void sendError(int id, int code, const QString &message)
-{
-    sendResponse({
-        {"jsonrpc","2.0"},
-        {"id",id},
-        {"error", QJsonObject{{"code",code},{"message",message}}}
-    });
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
-
-    // Sandbox anlegen
     QDir().mkpath(sandboxRoot());
 
     QJsonArray tools = makeToolList();
-
-    // stdin zeilenweise lesen — das ist die Server-Event-Loop
-    // Kein QThread nötig: QTextStream über stdin ist blocking,
-    // aber das ist der einzige Job dieses Prozesses.
     QTextStream in(stdin);
     QTextStream err(stderr);
 
@@ -405,7 +471,7 @@ int main(int argc, char *argv[])
         QJsonParseError parseErr;
         QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8(), &parseErr);
         if (parseErr.error != QJsonParseError::NoError) {
-            err << "JSON Parse Error: " << parseErr.errorString() << "\n";
+            err << "JSON parse error: " << parseErr.errorString() << "\n";
             err.flush();
             continue;
         }
@@ -415,45 +481,28 @@ int main(int argc, char *argv[])
         bool hasId      = msg.contains("id");
         int  id         = msg.value("id").toInt(-1);
 
-        // ─── initialize ──────────────────────────────────────────────────
         if (method == "initialize") {
-            sendResponse({
-                {"jsonrpc","2.0"}, {"id",id},
-                {"result", QJsonObject{
-                    {"protocolVersion","2024-11-05"},
-                    {"capabilities",   QJsonObject{}},
-                    {"serverInfo",     QJsonObject{
-                        {"name","llamaqt-filesystem"},
-                        {"version","1.0"}
-                    }}
-                }}
-            });
+            sendResponse({{"jsonrpc","2.0"},{"id",id},{"result",QJsonObject{
+                {"protocolVersion","2024-11-05"},
+                {"capabilities",   QJsonObject{}},
+                {"serverInfo",     QJsonObject{{"name","llamaqt-filesystem"},{"version","1.1"}}}
+            }}});
             continue;
         }
+        if (method == "notifications/initialized") continue;
 
-        // ─── notifications/initialized ───────────────────────────────────
-        if (method == "notifications/initialized") {
-            // Keine Antwort nötig (Notification)
-            continue;
-        }
-
-        // ─── tools/list ──────────────────────────────────────────────────
         if (method == "tools/list") {
-            sendResponse({
-                {"jsonrpc","2.0"}, {"id",id},
-                {"result", QJsonObject{{"tools", tools}}}
-            });
+            sendResponse({{"jsonrpc","2.0"},{"id",id},
+                          {"result",QJsonObject{{"tools",tools}}}});
             continue;
         }
 
-        // ─── tools/call ──────────────────────────────────────────────────
         if (method == "tools/call") {
-            QJsonObject params = msg.value("params").toObject();
-            QString toolName   = params.value("name").toString();
+            QJsonObject params   = msg.value("params").toObject();
+            QString toolName     = params.value("name").toString();
             QJsonObject toolArgs = params.value("arguments").toObject();
 
             std::pair<QString,bool> result;
-
             if      (toolName == "read_file")    result = handleReadFile(toolArgs);
             else if (toolName == "write_file")   result = handleWriteFile(toolArgs);
             else if (toolName == "append_file")  result = handleAppendFile(toolArgs);
@@ -461,17 +510,13 @@ int main(int argc, char *argv[])
             else if (toolName == "list_dir")     result = handleListDir(toolArgs);
             else if (toolName == "list_symbols") result = handleListSymbols(toolArgs);
             else if (toolName == "mkdir")        result = handleMkdir(toolArgs);
-            else result = {QString("Unbekanntes Tool: '%1'").arg(toolName), true};
+            else result = {QString("Unknown tool: '%1'").arg(toolName), true};
 
             sendResult(id, result.first, result.second);
             continue;
         }
 
-        // ─── Unbekannte Methode ───────────────────────────────────────────
-        if (hasId) {
-            sendError(id, -32601, QString("Method not found: %1").arg(method));
-        }
+        if (hasId) sendError(id, -32601, QString("Method not found: %1").arg(method));
     }
-
     return 0;
 }

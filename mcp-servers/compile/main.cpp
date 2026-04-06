@@ -1,10 +1,15 @@
 // ─── LlamaQt MCP Compile Server ──────────────────────────────────────────────
-// Baut CMake-Projekte und validiert Binaries aus der Sandbox.
+// Builds CMake projects and validates/runs binaries inside the sandbox.
+//
+// Security:
+//   - All paths are resolved relative to ~/llamatools/ (sandbox root)
+//   - Symlinks are rejected at every path check (sandbox escape prevention)
+//   - check_run only executes binaries inside the sandbox
 //
 // Advertised Tools:
-//   cmake_build  — CMake konfigurieren + bauen
-//   pkg_status   — installierte Dev-Pakete prüfen
-//   check_run    — Binary auf Existenz und Startfähigkeit prüfen
+//   cmake_build  — configure and build a CMake project
+//   pkg_status   — check installed development packages
+//   check_run    — verify and optionally test-run a sandbox binary
 
 #include <QCoreApplication>
 #include <QJsonDocument>
@@ -16,6 +21,7 @@
 #include <QStandardPaths>
 #include <QThread>
 #include <QTextStream>
+#include <QElapsedTimer>
 #include <iostream>
 
 // ─── Sandbox ─────────────────────────────────────────────────────────────────
@@ -25,7 +31,39 @@ static QString sandboxRoot()
            + "/llamatools";
 }
 
-// ─── JSON-RPC Hilfsfunktionen ─────────────────────────────────────────────────
+// ─── Symlink check ───────────────────────────────────────────────────────────
+// Walk every path component and reject if any is a symlink.
+// A directory symlink at any level could redirect the entire subtree
+// outside the sandbox (e.g. ln -s /etc ~/llamatools/etc).
+static bool isSymlinkInPath(const QString &absolutePath)
+{
+    QStringList parts = absolutePath.split('/', Qt::SkipEmptyParts);
+    QString current;
+    for (const QString &part : parts) {
+        current += "/" + part;
+        if (QFileInfo(current).isSymLink())
+            return true;
+    }
+    return false;
+}
+
+static bool isPathAllowed(const QString &path, QString &reason)
+{
+    QFileInfo fi(path);
+    QString abs = fi.absoluteFilePath();
+
+    if (!abs.startsWith(sandboxRoot())) {
+        reason = QString("Path outside sandbox: %1").arg(path);
+        return false;
+    }
+    if (isSymlinkInPath(abs)) {
+        reason = QString("Symlink detected — not allowed (sandbox escape risk): %1").arg(path);
+        return false;
+    }
+    return true;
+}
+
+// ─── JSON-RPC helpers ────────────────────────────────────────────────────────
 static void sendResponse(const QJsonObject &msg)
 {
     QByteArray line = QJsonDocument(msg).toJson(QJsonDocument::Compact) + "\n";
@@ -51,9 +89,8 @@ static void sendError(int id, int code, const QString &message)
 }
 
 // ─── runProcess ──────────────────────────────────────────────────────────────
-// Führt einen externen Prozess aus und gibt stdout+stderr zurück.
-// timeout_ms: maximale Wartezeit in Millisekunden.
-// isError wird true wenn exitCode != 0 oder Timeout.
+// Run an external process, capturing merged stdout+stderr.
+// Returns {output, failed}.
 static std::pair<QString,bool> runProcess(const QString &cmd,
                                            const QStringList &args,
                                            const QString &workDir,
@@ -61,56 +98,55 @@ static std::pair<QString,bool> runProcess(const QString &cmd,
 {
     QProcess proc;
     proc.setWorkingDirectory(workDir);
-    proc.setProcessChannelMode(QProcess::MergedChannels); // stdout+stderr gemeinsam
+    proc.setProcessChannelMode(QProcess::MergedChannels);
     proc.start(cmd, args);
 
     if (!proc.waitForStarted(5000))
-        return {QString("Fehler: '%1' konnte nicht gestartet werden.").arg(cmd), true};
+        return {QString("Error: could not start '%1'.").arg(cmd), true};
 
     if (!proc.waitForFinished(timeoutMs)) {
         proc.kill();
         proc.waitForFinished(1000);
-        return {QString("Fehler: Timeout nach %1s.\n%2")
+        return {QString("Error: timeout after %1s.\n%2")
                 .arg(timeoutMs/1000)
                 .arg(QString::fromUtf8(proc.readAll())), true};
     }
 
     QString output = QString::fromUtf8(proc.readAll());
     bool failed = (proc.exitCode() != 0);
-    return {output.isEmpty() ? "(keine Ausgabe)" : output, failed};
+    return {output.isEmpty() ? "(no output)" : output, failed};
 }
 
-// ─── Tool-Handler ─────────────────────────────────────────────────────────────
+// ─── Tool handlers ────────────────────────────────────────────────────────────
 
-// cmake_build: konfiguriert und baut ein CMake-Projekt.
+// cmake_build: configure and build a CMake project inside the sandbox.
 //
-// build_dir: Pfad zum Build-Verzeichnis (relativ zur Sandbox oder absolut).
-//            Default: <sandbox>/build
-// source_dir: Pfad zum Source-Verzeichnis (wo CMakeLists.txt liegt).
-//             Default: <sandbox>
-// compiler:   "g++" oder "clang++" — leer = CMake-Default
-//
-// Ablauf: cmake .. → cmake --build . -jN
+// Paths (build_dir, source_dir) are relative to sandbox root unless absolute.
+// Absolute paths must still be inside the sandbox.
+// Symlinks are rejected.
 static std::pair<QString,bool> handleCmakeBuild(const QJsonObject &args)
 {
-    // Pfade auflösen — absolut oder relativ zur Sandbox
     QString buildDir  = args.value("build_dir").toString("build");
     QString sourceDir = args.value("source_dir").toString(".");
     QString compiler  = args.value("compiler").toString();
 
-    // Relative Pfade relativ zur Sandbox
+    // Resolve relative paths against sandbox root
     if (!buildDir.startsWith('/'))  buildDir  = sandboxRoot() + "/" + buildDir;
     if (!sourceDir.startsWith('/')) sourceDir = sandboxRoot() + "/" + sourceDir;
 
+    QString reason;
+    if (!isPathAllowed(buildDir, reason))   return {reason, true};
+    if (!isPathAllowed(sourceDir, reason))  return {reason, true};
+
     QDir().mkpath(buildDir);
 
-    // Bei Compiler-Wechsel CMakeCache löschen — sonst ignoriert CMake den Wechsel
+    // Clear CMakeCache when switching compilers to avoid stale config
     if (!compiler.isEmpty()) {
         QString cache = buildDir + "/CMakeCache.txt";
         if (QFile::exists(cache)) QFile::remove(cache);
     }
 
-    // ─── Schritt 1: cmake konfigurieren ─────────────────────────────────
+    // Step 1: cmake configure
     QStringList cmakeArgs = {sourceDir, "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"};
     if (compiler == "clang++")
         cmakeArgs << "-DCMAKE_CXX_COMPILER=clang++" << "-DCMAKE_C_COMPILER=clang";
@@ -119,23 +155,21 @@ static std::pair<QString,bool> handleCmakeBuild(const QJsonObject &args)
 
     auto [confOut, confFailed] = runProcess("cmake", cmakeArgs, buildDir);
     if (confFailed)
-        return {"CMake Konfiguration fehlgeschlagen:\n" + confOut, true};
+        return {"CMake configuration failed:\n" + confOut, true};
 
-    // ─── Schritt 2: cmake --build ────────────────────────────────────────
+    // Step 2: cmake --build
     int cores = QThread::idealThreadCount();
     auto [buildOut, buildFailed] = runProcess(
         "cmake", {"--build", ".", "-j", QString::number(cores)}, buildDir);
 
-    QString summary = QString("Build-Verzeichnis: %1\nCores: %2\n\n%3")
+    QString summary = QString("Build dir: %1\nCores: %2\n\n%3")
                       .arg(buildDir).arg(cores).arg(buildOut);
     return {summary, buildFailed};
 }
 
-// pkg_status: listet installierte Entwicklungspakete auf.
-// Nützlich um zu prüfen ob Qt6-dev, cmake, g++ etc. vorhanden sind.
+// pkg_status: list installed development packages.
 static std::pair<QString,bool> handlePkgStatus(const QJsonObject &)
 {
-    // dpkg-query -W gibt Name + Version für installierte Pakete zurück
     QStringList packages = {
         "cmake", "g++", "clang", "make", "ninja-build",
         "qt6-base-dev", "libgl1-mesa-dev", "pkg-config"
@@ -143,71 +177,130 @@ static std::pair<QString,bool> handlePkgStatus(const QJsonObject &)
 
     QString result;
     for (const QString &pkg : packages) {
-        auto [out, failed] = runProcess("dpkg-query", {"-W", "-f=${Package} ${Version}\n", pkg}, "/tmp", 5000);
+        auto [out, failed] = runProcess(
+            "dpkg-query", {"-W", "-f=${Package} ${Version}\n", pkg}, "/tmp", 5000);
         result += failed
-            ? QString("[ ] %1 - nicht installiert\n").arg(pkg)
+            ? QString("[ ] %1 - not installed\n").arg(pkg)
             : QString("[x] %1\n").arg(out.trimmed());
     }
     return {result.trimmed(), false};
 }
 
-// check_run: prüft ob ein Binary existiert und ausführbar ist.
-// Mit danger_zone:true wird ein 3-Sekunden-Testlauf durchgeführt.
-// Sicherheit: Binary muss sich in sandbox/build/ befinden.
+// check_run: verify a sandbox binary and optionally run it.
+//
+// Path resolution:
+//   - 'binary' is relative to sandbox root (~/llamatools/)
+//   - Absolute paths are accepted if inside the sandbox
+//   - Symlinks are rejected
+//
+// With danger_zone:true a timed test run is performed.
+// Reports: exit code, actual runtime (ms), timeout limit, stdout, stderr.
 static std::pair<QString,bool> handleCheckRun(const QJsonObject &args)
 {
-    QString binary   = args.value("binary").toString();
+    QString binary     = args.value("binary").toString();
     bool    dangerZone = args.value("danger_zone").toBool(false);
+    int     timeoutMs  = args.value("timeout_ms").toInt(5000);
 
     if (binary.isEmpty())
-        return {"Fehler: 'binary' fehlt.", true};
+        return {"Error: 'binary' is required.", true};
 
-    // Pfad auflösen — nur innerhalb sandbox/build erlaubt
+    // Resolve path: relative → sandbox root (no automatic /build/ prefix)
     QString fullPath = binary.startsWith('/')
                        ? binary
-                       : sandboxRoot() + "/build/" + binary;
+                       : sandboxRoot() + "/" + binary;
+
+    QString reason;
+    if (!isPathAllowed(fullPath, reason))
+        return {reason, true};
 
     QFileInfo fi(fullPath);
-    if (!fi.absoluteFilePath().startsWith(sandboxRoot()))
-        return {"Fehler: Binary ausserhalb der Sandbox.", true};
-
     if (!fi.exists())
-        return {QString("Binary nicht gefunden: %1").arg(fullPath), true};
+        return {QString("Error: binary not found: %1\n"
+                        "(resolved to: %2)").arg(binary, fullPath), true};
     if (!fi.isExecutable())
-        return {QString("Binary nicht ausfuehrbar: %1").arg(fullPath), true};
+        return {QString("Error: not executable: %1").arg(fullPath), true};
 
-    if (!dangerZone)
-        return {QString("OK: Binary vorhanden und ausfuehrbar.\nPfad: %1\n"
-                        "Groesse: %2 Bytes\n"
-                        "(Testlauf deaktiviert - danger_zone:true zum Starten)")
-                .arg(fullPath).arg(fi.size()), false};
+    QString info = QString("Binary:   %1\nSize:     %2 bytes\n")
+                   .arg(fullPath).arg(fi.size());
 
-    // ─── 3-Sekunden Testlauf ─────────────────────────────────────────────
-    // QProcess::start() + 3s warten + terminate()
-    // waitForFinished(1000) danach — falls terminate() nicht reicht: kill()
+    if (!dangerZone) {
+        info += QString("Status:   present and executable\n"
+                        "(set danger_zone:true to run it)");
+        return {info, false};
+    }
+
+    // ─── Timed test run ───────────────────────────────────────────────────
+    // Run the binary with separate stdout/stderr capture.
+    // QElapsedTimer measures actual wall-clock runtime in milliseconds.
+    //
+    // Outcome A: binary exits before timeout
+    //   → report exit code (0 = success, != 0 = failure), runtime, output
+    //
+    // Outcome B: binary still running after timeout
+    //   → send SIGTERM, wait 1s, then SIGKILL if needed
+    //   → report "still running after Nms" as success indicator
     QProcess proc;
-    proc.start(fullPath);
-    if (!proc.waitForStarted(3000))
-        return {"Testlauf: Start fehlgeschlagen.", true};
+    proc.setProgram(fullPath);
+    // Keep stdout and stderr separate so the model can distinguish them
+    proc.setProcessChannelMode(QProcess::SeparateChannels);
 
-    // 3 Sekunden laufen lassen
-    bool stillRunning = !proc.waitForFinished(3000);
+    QElapsedTimer timer;
+    timer.start();
+    proc.start();
 
-    if (stillRunning) {
+    if (!proc.waitForStarted(3000)) {
+        return {info + "Error: could not start process.", true};
+    }
+
+    bool exitedInTime = proc.waitForFinished(timeoutMs);
+    qint64 elapsedMs  = timer.elapsed();
+
+    QString stdoutStr = QString::fromUtf8(proc.readAllStandardOutput());
+    QString stderrStr = QString::fromUtf8(proc.readAllStandardError());
+
+    // Truncate very long output so the model context is not flooded
+    auto truncate = [](const QString &s, int maxChars) -> QString {
+        if (s.length() <= maxChars) return s;
+        return s.left(maxChars) + QString("\n[... truncated at %1 chars]").arg(maxChars);
+    };
+    stdoutStr = truncate(stdoutStr, 2000);
+    stderrStr = truncate(stderrStr, 2000);
+
+    QString report = info;
+    report += QString("Timeout limit: %1 ms\n").arg(timeoutMs);
+    report += QString("Actual runtime: %1 ms\n").arg(elapsedMs);
+
+    if (exitedInTime) {
+        int exitCode = proc.exitCode();
+        report += QString("Exit code: %1 (%2)\n")
+                  .arg(exitCode)
+                  .arg(exitCode == 0 ? "success" : "failure");
+        if (!stdoutStr.isEmpty())
+            report += QString("\n--- stdout ---\n%1").arg(stdoutStr);
+        if (!stderrStr.isEmpty())
+            report += QString("\n--- stderr ---\n%1").arg(stderrStr);
+
+        bool failed = (exitCode != 0);
+        return {report, failed};
+
+    } else {
+        // Binary did not exit within the timeout — terminate it
         proc.terminate();
         if (!proc.waitForFinished(1000))
             proc.kill();
-        return {QString("Testlauf OK: Binary lief 3s stabil.\nPfad: %1").arg(fullPath), false};
-    } else {
-        return {QString("Testlauf: Binary beendet nach < 3s.\n"
-                        "Exit-Code: %1\n%2")
-                .arg(proc.exitCode())
-                .arg(QString::fromUtf8(proc.readAll())),
-                proc.exitCode() != 0};
+
+        report += QString("Result: still running after %1 ms — terminated\n").arg(timeoutMs);
+        report += "(This is normal for interactive or server processes)\n";
+        if (!stdoutStr.isEmpty())
+            report += QString("\n--- stdout (partial) ---\n%1").arg(stdoutStr);
+        if (!stderrStr.isEmpty())
+            report += QString("\n--- stderr (partial) ---\n%1").arg(stderrStr);
+
+        return {report, false};  // "still running" is not an error
     }
 }
 
-// ─── Tool-Definitionen ───────────────────────────────────────────────────────
+// ─── Tool list ───────────────────────────────────────────────────────────────
 static QJsonArray makeToolList()
 {
     auto makeProp = [](const QString &type, const QString &desc) {
@@ -221,22 +314,29 @@ static QJsonArray makeToolList()
 
     return QJsonArray{
         makeTool("cmake_build",
-            "Konfiguriert und baut ein CMake-Projekt. "
-            "Gibt Build-Ausgabe zurueck. Relative Pfade zur Sandbox.",
-            {{"build_dir",  makeProp("string","Build-Verzeichnis (default: build)")},
-             {"source_dir", makeProp("string","Source-Verzeichnis mit CMakeLists.txt (default: .)")},
-             {"compiler",   makeProp("string","Compiler: g++ oder clang++ (optional)")}},
+            "Configure and build a CMake project inside the sandbox (~/llamatools/). "
+            "Relative paths are resolved against the sandbox root. "
+            "Returns build output. Symlinks are rejected.",
+            {{"build_dir",  makeProp("string",  "Build directory relative to sandbox root (default: build)")},
+             {"source_dir", makeProp("string",  "Source directory containing CMakeLists.txt (default: .)")},
+             {"compiler",   makeProp("string",  "Compiler to use: g++ or clang++ (optional)")}},
             {}),
 
         makeTool("pkg_status",
-            "Listet installierte Entwicklungspakete (cmake, g++, qt6-base-dev, ...).",
+            "List installed development packages: cmake, g++, clang, qt6-base-dev, etc. "
+            "Useful to check the build environment before attempting a build.",
             {}, {}),
 
         makeTool("check_run",
-            "Prueft ob ein Binary existiert und ausfuehrbar ist. "
-            "Mit danger_zone:true wird ein 3-Sekunden-Testlauf gemacht.",
-            {{"binary",     makeProp("string","Binary-Name oder Pfad (relativ zu sandbox/build/)")},
-             {"danger_zone",makeProp("boolean","true = 3s Testlauf (default: false)")}},
+            "Verify that a sandbox binary exists and is executable. "
+            "With danger_zone:true, runs the binary for up to timeout_ms milliseconds "
+            "and reports: exit code, actual runtime, stdout and stderr. "
+            "Path is relative to sandbox root (~/llamatools/) — no automatic /build/ prefix. "
+            "Example: 'build/MyApp' resolves to ~/llamatools/build/MyApp. "
+            "Symlinks are rejected.",
+            {{"binary",      makeProp("string",  "Binary path relative to sandbox root")},
+             {"danger_zone", makeProp("boolean", "true = run the binary (default: false)")},
+             {"timeout_ms",  makeProp("integer", "Max run time in ms (default: 5000)")}},
             {"binary"})
     };
 }
@@ -257,7 +357,7 @@ int main(int argc, char *argv[])
         QJsonParseError parseErr;
         QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8(), &parseErr);
         if (parseErr.error != QJsonParseError::NoError) {
-            errStream << "JSON Parse Error: " << parseErr.errorString() << "\n";
+            errStream << "JSON parse error: " << parseErr.errorString() << "\n";
             errStream.flush();
             continue;
         }
@@ -271,7 +371,7 @@ int main(int argc, char *argv[])
             sendResponse({{"jsonrpc","2.0"},{"id",id},{"result",QJsonObject{
                 {"protocolVersion","2024-11-05"},
                 {"capabilities",   QJsonObject{}},
-                {"serverInfo",     QJsonObject{{"name","llamaqt-compile"},{"version","1.0"}}}
+                {"serverInfo",     QJsonObject{{"name","llamaqt-compile"},{"version","1.1"}}}
             }}});
             continue;
         }
@@ -289,11 +389,10 @@ int main(int argc, char *argv[])
             QJsonObject toolArgs = params.value("arguments").toObject();
 
             std::pair<QString,bool> result;
-
             if      (toolName == "cmake_build") result = handleCmakeBuild(toolArgs);
             else if (toolName == "pkg_status")  result = handlePkgStatus(toolArgs);
             else if (toolName == "check_run")   result = handleCheckRun(toolArgs);
-            else result = {QString("Unbekanntes Tool: '%1'").arg(toolName), true};
+            else result = {QString("Unknown tool: '%1'").arg(toolName), true};
 
             sendResult(id, result.first, result.second);
             continue;
@@ -301,6 +400,5 @@ int main(int argc, char *argv[])
 
         if (hasId) sendError(id, -32601, "Method not found: " + method);
     }
-
     return 0;
 }

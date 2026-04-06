@@ -1,11 +1,11 @@
 // ─── LlamaQt MCP WebSearch Server ────────────────────────────────────────────
-// Web-Suche via Tavily API.
+// Web search via Tavily API.
 //
-// API-Key wird aus der Umgebungsvariable TAVILY_API_KEY gelesen.
-// Setzen vor dem Start: export TAVILY_API_KEY="tvly-..."
+// The API key is read from the environment variable TAVILY_API_KEY.
+// Set it before starting: export TAVILY_API_KEY="tvly-..."
 //
 // Advertised Tools:
-//   web_search  — Sucht im Web, gibt Titel + URL + Snippet zurueck
+//   web_search  — search the web, returns title + URL + snippet per result
 
 #include <QCoreApplication>
 #include <QJsonDocument>
@@ -20,7 +20,7 @@
 #include <QUrl>
 #include <iostream>
 
-// ─── JSON-RPC Hilfsfunktionen ─────────────────────────────────────────────────
+// ─── JSON-RPC helpers ────────────────────────────────────────────────────────
 static void sendResponse(const QJsonObject &msg)
 {
     QByteArray line = QJsonDocument(msg).toJson(QJsonDocument::Compact) + "\n";
@@ -46,18 +46,12 @@ static void sendError(int id, int code, const QString &message)
 }
 
 // ─── performSearch ────────────────────────────────────────────────────────────
-// Sendet einen POST-Request an die Tavily Search API und gibt die Ergebnisse
-// als formatierten String zurück.
+// POST to Tavily Search API, return formatted results.
 //
-// Tavily API: https://docs.tavily.com/docs/rest-api/api-reference
-// Request:  POST https://api.tavily.com/search
-//           Body: {"api_key":"...", "query":"...", "search_depth":"basic",
-//                  "max_results":5}
-// Response: {"results": [{"title":"...", "url":"...", "content":"..."}]}
-//
-// QNetworkAccessManager ist async — wir nutzen eine lokale QEventLoop
-// um synchron zu warten (MCP-Server ist single-threaded blocking).
-// Das ist das Qt-Äquivalent zu einem blocking HTTP-Client.
+// We use a local QEventLoop to block until the async QNetworkReply finishes.
+// This is the Qt equivalent of a synchronous HTTP call — acceptable here
+// because the MCP server is single-threaded and has no other work to do
+// while waiting for the network response.
 static QString performSearch(const QString &query, const QString &apiKey, int maxResults)
 {
     QNetworkAccessManager manager;
@@ -73,8 +67,6 @@ static QString performSearch(const QString &query, const QString &apiKey, int ma
 
     QNetworkReply *reply = manager.post(request, QJsonDocument(body).toJson());
 
-    // Lokale EventLoop: blockiert bis reply->finished() emittiert wird.
-    // Kein QThread nötig — wir sind der einzige Prozess, der auf Antwort wartet.
     QEventLoop loop;
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     loop.exec();
@@ -82,21 +74,19 @@ static QString performSearch(const QString &query, const QString &apiKey, int ma
     if (reply->error() != QNetworkReply::NoError) {
         QString err = reply->errorString();
         reply->deleteLater();
-        return "Netzwerk-Fehler: " + err;
+        return "Network error: " + err;
     }
 
     QJsonDocument resDoc = QJsonDocument::fromJson(reply->readAll());
     reply->deleteLater();
 
     if (resDoc.isNull() || !resDoc.isObject())
-        return "Fehler: Ungueltige API-Antwort.";
+        return "Error: invalid API response.";
 
     QJsonArray results = resDoc.object().value("results").toArray();
     if (results.isEmpty())
-        return "Keine Ergebnisse gefunden.";
+        return "No results found.";
 
-    // Ergebnisse formatieren: Titel + URL + Snippet
-    // Jedes Ergebnis durch Trennlinie abgegrenzt
     QString output;
     int num = 1;
     for (const QJsonValue &val : results) {
@@ -105,7 +95,7 @@ static QString performSearch(const QString &query, const QString &apiKey, int ma
         QString url     = item.value("url").toString();
         QString content = item.value("content").toString();
 
-        // Snippet kürzen — Modell-Kontext schonen
+        // Truncate snippet to keep model context manageable
         if (content.length() > 500)
             content = content.left(500) + "...";
 
@@ -116,7 +106,7 @@ static QString performSearch(const QString &query, const QString &apiKey, int ma
     return output.trimmed();
 }
 
-// ─── Tool-Definitionen ───────────────────────────────────────────────────────
+// ─── Tool list ───────────────────────────────────────────────────────────────
 static QJsonArray makeToolList()
 {
     auto makeProp = [](const QString &type, const QString &desc) {
@@ -130,11 +120,12 @@ static QJsonArray makeToolList()
 
     return QJsonArray{
         makeTool("web_search",
-            "Sucht im Web via Tavily API. "
-            "Gibt Titel, URL und Snippet der Top-Ergebnisse zurueck. "
-            "Ideal fuer aktuelle Informationen, Qt6-Doku, C++ Fehlermeldungen.",
-            {{"query",       makeProp("string",  "Suchbegriff oder Frage")},
-             {"max_results", makeProp("integer", "Anzahl Ergebnisse (default: 5, max: 10)")}},
+            "Search the web using the Tavily API. "
+            "Returns title, URL and a short snippet for each result. "
+            "Useful for current information, Qt6 documentation, "
+            "C++ error messages and library references.",
+            {{"query",       makeProp("string",  "Search query or question")},
+             {"max_results", makeProp("integer", "Number of results (default: 5, max: 10)")}},
             {"query"})
     };
 }
@@ -144,18 +135,15 @@ int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
 
-    // API-Key aus Umgebungsvariable lesen — nie hardcoden!
-    // Setzen mit: export TAVILY_API_KEY="tvly-..."
     QString apiKey = QProcessEnvironment::systemEnvironment()
                      .value("TAVILY_API_KEY");
 
     QTextStream errStream(stderr);
     if (apiKey.isEmpty()) {
-        errStream << "[llamaqt-websearch] WARNUNG: TAVILY_API_KEY nicht gesetzt.\n"
-                  << "Web-Suche wird fehlschlagen. Setzen mit:\n"
+        errStream << "[llamaqt-websearch] WARNING: TAVILY_API_KEY not set.\n"
+                  << "Web search will fail. Set it with:\n"
                   << "  export TAVILY_API_KEY=\"tvly-...\"\n";
         errStream.flush();
-        // Server läuft trotzdem — gibt bei Tool-Calls Fehlermeldung zurück
     }
 
     QJsonArray tools = makeToolList();
@@ -168,7 +156,7 @@ int main(int argc, char *argv[])
         QJsonParseError parseErr;
         QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8(), &parseErr);
         if (parseErr.error != QJsonParseError::NoError) {
-            errStream << "JSON Parse Error: " << parseErr.errorString() << "\n";
+            errStream << "JSON parse error: " << parseErr.errorString() << "\n";
             errStream.flush();
             continue;
         }
@@ -182,7 +170,7 @@ int main(int argc, char *argv[])
             sendResponse({{"jsonrpc","2.0"},{"id",id},{"result",QJsonObject{
                 {"protocolVersion","2024-11-05"},
                 {"capabilities",   QJsonObject{}},
-                {"serverInfo",     QJsonObject{{"name","llamaqt-websearch"},{"version","1.0"}}}
+                {"serverInfo",     QJsonObject{{"name","llamaqt-websearch"},{"version","1.1"}}}
             }}});
             continue;
         }
@@ -202,30 +190,30 @@ int main(int argc, char *argv[])
             if (toolName == "web_search") {
                 if (apiKey.isEmpty()) {
                     sendResult(id,
-                        "Fehler: TAVILY_API_KEY nicht gesetzt. "
-                        "Server-Prozess mit 'export TAVILY_API_KEY=...' starten.", true);
+                        "Error: TAVILY_API_KEY is not set. "
+                        "Start the server process with: export TAVILY_API_KEY=tvly-...", true);
                     continue;
                 }
 
                 QString query      = toolArgs.value("query").toString();
                 int     maxResults = toolArgs.value("max_results").toInt(5);
-                maxResults = qBound(1, maxResults, 10);  // 1..10
+                maxResults = qBound(1, maxResults, 10);
 
                 if (query.isEmpty()) {
-                    sendResult(id, "Fehler: 'query' fehlt.", true);
+                    sendResult(id, "Error: 'query' is required.", true);
                     continue;
                 }
 
                 QString result = performSearch(query, apiKey, maxResults);
-                sendResult(id, result, result.startsWith("Fehler:") || result.startsWith("Netzwerk-Fehler:"));
+                bool isErr = result.startsWith("Error:") || result.startsWith("Network error:");
+                sendResult(id, result, isErr);
             } else {
-                sendResult(id, QString("Unbekanntes Tool: '%1'").arg(toolName), true);
+                sendResult(id, QString("Unknown tool: '%1'").arg(toolName), true);
             }
             continue;
         }
 
         if (hasId) sendError(id, -32601, "Method not found: " + method);
     }
-
     return 0;
 }
