@@ -10,9 +10,10 @@ set(CMAKE_AUTORCC ON)
 # ─── Qt6 ────────────────────────────────────────────────────────────────────
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 
-# ─── llama.cpp Pfade ────────────────────────────────────────────────────────
-set(LLAMA_BUILD_DIR "$ENV{HOME}/ai/qLP/build" CACHE PATH "llama.cpp build dir")
-set(LLAMA_SRC_DIR   "$ENV{HOME}/ai/qLP"       CACHE PATH "llama.cpp source dir")
+# ─── Llama.cpp ──────────────────────────────────────────────────────────────
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LLAMA REQUIRED IMPORTED_TARGET llama)
+
 
 # ─── Sources ────────────────────────────────────────────────────────────────
 set(SOURCES
@@ -40,30 +41,18 @@ add_executable(LlamaQt ${SOURCES} ${HEADERS}
     src/MainWindow.ui)
 
 # ─── Include-Pfade ──────────────────────────────────────────────────────────
+# Hinweis: PkgConfig::LLAMA bringt Include-Pfade und RPATH automatisch mit.
+# Wir fügen nur src/ manuell hinzu.
 target_include_directories(LlamaQt PRIVATE
     src/
-    ${LLAMA_SRC_DIR}/include
-    ${LLAMA_SRC_DIR}/ggml/include
-    ${LLAMA_BUILD_DIR}/
-)
-
-# ─── Libraries ──────────────────────────────────────────────────────────────
-find_library(LLAMA_LIB
-    NAMES llama
-    HINTS ${LLAMA_BUILD_DIR} ${LLAMA_BUILD_DIR}/src
-    REQUIRED
+    ${LLAMA_INCLUDE_DIRS}
 )
 
 target_link_libraries(LlamaQt PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
-    ${LLAMA_LIB}
-)
-
-set_target_properties(LlamaQt PROPERTIES
-    BUILD_RPATH "${LLAMA_BUILD_DIR};${LLAMA_BUILD_DIR}/src"
-    INSTALL_RPATH "${LLAMA_BUILD_DIR};${LLAMA_BUILD_DIR}/src"
+    PkgConfig::LLAMA
 )
 
 # ─── MCP Server Subprojekte ──────────────────────────────────────────────────

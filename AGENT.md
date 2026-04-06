@@ -1,14 +1,16 @@
 # LlamaQt — AGENT.md
-> Dieses Dokument ist das Projektgedächtnis für Claude (analog zu Claude Code).
-> Es beschreibt Architektur, Konventionen und aktuellen Stand so dass Claude
-> nach einer Session-Pause sofort produktiv ist.
+> Projektgedächtnis für Claude (analog zu Claude Code).
+> Nach einer Session-Pause hier einlesen um sofort produktiv zu sein.
+> Wird durch /init [Projektname] angelegt und durch den Agenten aktuell gehalten.
 
 ---
 
 ## Projektübersicht
 
-**LlamaQt** ist eine lokale LLM-Chat-Oberfläche in C++/Qt6.
-- Inference: llama.cpp (Qwen3.5-9B-Q6_K, lokal)
+**LlamaQt** ist eine lokale LLM-Chat-Oberfläche die zu einem vollständigen
+**lokalen Coding-Agenten** ausgebaut wird.
+
+- Inference: llama.cpp (Qwen3.5-9B-Q6_K, lokal, kein Cloud)
 - Tool-Use: MCP-Server via stdio JSON-RPC 2.0
 - GUI: Qt6 Widgets (QMainWindow, QDockWidget)
 - Build: CMake, Debian Trixie
@@ -28,15 +30,15 @@ Agent       (Presenter)  ← Herzstück, GUI-Thread
     │     ├── McpClient sysinfo     (llamaqt-sysinfo)
     │     ├── McpClient compile     (llamaqt-compile)
     │     └── McpClient websearch   (llamaqt-websearch)
-    ├── CommandProcessor — Slash-Kommandos (/init, /build, /compile, /run)
+    ├── CommandProcessor — Slash-Kommandos
     └── LlamaWorker      (Active Object, Worker-Thread)
-          └── llama.cpp  (llama_model, llama_context, llama_sampler)
+          └── llama.cpp
 ```
 
 ### Threading
-- **GUI-Thread**: MainWindow, Agent, McpManager, McpClient (QProcess-Callbacks)
+- **GUI-Thread**: MainWindow, Agent, McpManager, McpClient
 - **Worker-Thread**: LlamaWorker (blockierende llama.cpp Inference)
-- Kommunikation: Qt Signals/Slots mit QueuedConnection (thread-safe Queue)
+- Kommunikation: Qt Signals/Slots mit QueuedConnection
 
 ---
 
@@ -45,86 +47,87 @@ Agent       (Presenter)  ← Herzstück, GUI-Thread
 ```
 LlamaQt/
 ├── CMakeLists.txt
-├── AGENT.md                  ← dieses Dokument
+├── AGENT.md
 ├── README.md
 ├── src/
 │   ├── main.cpp
 │   ├── MainWindow.h/.cpp/.ui
-│   ├── Agent.h/.cpp          — Presenter, Agenten-Loop
-│   ├── CommandProcessor.h/.cpp — Slash-Kommandos
-│   ├── ChatModel.h/.cpp      — ChatML Prompt-Builder
-│   ├── LlamaWorker.h/.cpp    — llama.cpp Inference-Thread
-│   ├── McpClient.h/.cpp      — JSON-RPC 2.0 stdio Client
-│   └── McpManager.h/.cpp     — Facade, Tool-Routing
+│   ├── Agent.h/.cpp
+│   ├── CommandProcessor.h/.cpp
+│   ├── ChatModel.h/.cpp
+│   ├── LlamaWorker.h/.cpp
+│   ├── McpClient.h/.cpp
+│   └── McpManager.h/.cpp
 └── mcp-servers/
-    ├── filesystem/            — read_file, write_file, str_replace, ...
-    ├── sysinfo/               — get_time, get_pwd, disk_free, sys_info
-    ├── compile/               — cmake_build, pkg_status, check_run
-    └── websearch/             — web_search (Tavily API)
+    ├── filesystem/   — Dateioperationen + Git
+    ├── sysinfo/      — Systeminfo (read-only)
+    ├── compile/      — Build + Retry-Loop
+    └── websearch/    — Tavily API
 ```
 
 ---
 
-## MCP-Server
+## MCP-Server & Tools
 
-| Server       | Binary                  | Tools                                                    |
-|--------------|-------------------------|----------------------------------------------------------|
-| filesystem   | llamaqt-filesystem      | read_file, write_file, append_file, str_replace, list_dir, list_symbols, mkdir |
-| sysinfo      | llamaqt-sysinfo         | get_time, get_pwd, disk_free, sys_info                   |
-| compile      | llamaqt-compile         | cmake_build, pkg_status, check_run                       |
-| websearch    | llamaqt-websearch       | web_search                                               |
+### filesystem (llamaqt-filesystem)
+Sandbox: `~/llamatools/` — Symlink-Schutz auf jeder Pfadebene.
+Git-Repo wird durch `/init` initialisiert. Vor jedem schreibenden
+Zugriff: auto-commit. Remote-Operationen gesperrt.
 
-**Sandbox**: `~/llamatools/` — alle Dateizugriffe nur hier erlaubt.
-**Symlink-Schutz**: Jede Pfadkomponente wird auf Symlinks geprüft (kein Sandbox-Escape).
+| Tool          | Beschreibung                                      |
+|---------------|---------------------------------------------------|
+| read_file     | Datei lesen, optional Zeilenbereich               |
+| write_file    | Datei schreiben (auto-commit vorher)              |
+| append_file   | Anhängen (auto-commit vorher)                     |
+| str_replace   | Eindeutiger Replace (auto-commit vorher)          |
+| list_dir      | Verzeichnis auflisten (Symlinks markiert)         |
+| list_symbols  | C++ Klassen/Methoden aus Quelldatei               |
+| mkdir         | Verzeichnis anlegen                               |
+| grep_code     | Regulären Ausdruck in Dateien suchen (rekursiv)   |
+| tree          | Rekursiver Verzeichnisbaum                        |
+| git_status    | git status in Sandbox                             |
+| git_diff      | git diff (working tree oder zwischen Commits)     |
+| git_log       | git log (letzte N Commits)                        |
+| git_checkout  | git checkout (Datei/Commit) — kein remote        |
+
+### compile (llamaqt-compile)
+| Tool        | Beschreibung                                          |
+|-------------|-------------------------------------------------------|
+| cmake_build | cmake + make, auto Retry-Loop (3x bei Fehler)        |
+| pkg_status  | installierte Pakete prüfen                           |
+| check_run   | Binary prüfen/starten (danger_zone:true = run)       |
+
+### sysinfo / websearch — unverändert
 
 ---
 
-## Sampler-Profile (LlamaWorker)
+## Sampler-Profile
 
 | Profil | Top-K | Temp | Top-P | Verwendung              |
 |--------|-------|------|-------|-------------------------|
 | Chat   | 40    | 0.7  | 0.95  | Normale Konversation    |
 | Tool   | 20    | 0.1  | 0.50  | Tool-Calls, nach Tools  |
 
-**Hinweis**: Lazy-Grammar (llama_sampler_init_grammar_lazy_patterns) ist für
-Qwen3 + Thinking noch nicht stabil — GGML_ASSERT bei Trigger-Token.
-Stattdessen: Post-hoc JSON-Validierung in Agent::handleToolCall().
-
 ---
 
-## Tool-Call Format (Qwen3 Hermes)
-
-```
-<tool_call>
-{"name": "tool_name", "arguments": {"key": "value"}}
-</tool_call>
-```
-
-Thinking läuft durch `<think>...</think>` Blöcke davor.
-
----
-
-## Agenten-Loop (Agent.cpp)
+## Agenten-Loop
 
 ```
 onUserMessage()
+    → CommandProcessor::process()   (Slash-Kommando?)
+    → checkContextUsage()           (>80% → auto-summarize)
     → startGeneration(Chat)
-        → onTokenReceived()  [filterToken: think vs. sichtbar]
+        → onTokenReceived()         [filterToken: think vs. sichtbar]
         → onGenerationDone()
-            ├── Fall A: offener <tool_call> ohne </tool_call>
-            │     → Continuation (max 3x, SamplerProfile::Tool)
-            ├── Fall B: vollständiger <tool_call>...</tool_call>
-            │     → handleToolCall()
-            │           → JSON validieren / reparieren
-            │           → m_mcp.callTool()
-            │           → Tool-Ergebnis in ChatModel
-            │           → startGeneration(Tool)
+            ├── Fall A: offener <tool_call>  → Continuation (max 3x)
+            ├── Fall B: vollständiger Tool-Call
+            │     → JSON validieren / reparieren
+            │     → Deadlock-Check (3/5/7 Eskalation)
+            │     → m_mcp.callTool()
+            │     → Diff anzeigen (bei Datei-Änderungen)
+            │     → Tool-Ergebnis → startGeneration(Tool)
             └── Fall C: normale Antwort → fertig
 ```
-
-**Deadlock-Erkennung** (seit Patch 2):
-- Gleiches Tool + gleiche Argumente schlägt N mal fehl
-- Eskalation: 3x → Warnung ans LLM, 5x → andere Lösung suchen, 7x → Abbruch
 
 ---
 
@@ -132,28 +135,136 @@ onUserMessage()
 
 | Kommando              | Aktion                                                        |
 |-----------------------|---------------------------------------------------------------|
-| `/init [Projektname]` | Verzeichnis + AGENT.md in Sandbox anlegen, Modell einweisen  |
-| `/build`              | cmake + make (via cmake_build Tool)                          |
-| `/compile`            | nur make (via cmake_build Tool, kein Re-Configure)           |
-| `/run`                | ggf. cmake + make, dann check_run mit danger_zone:true        |
+| `/init [Name]`        | Verzeichnis + Git-Repo + AGENT.md in Sandbox anlegen         |
+| `/build`              | cmake + make (mit Retry-Loop)                                |
+| `/compile`            | nur make                                                      |
+| `/run`                | cmake (falls nötig) + make + Binary starten                  |
+| `/summarize`          | Konversation manuell zusammenfassen                          |
+| `/undo`               | letzten git-commit rückgängig                                |
+| `/diff`               | git diff anzeigen (letzte Änderungen)                        |
 
 ---
 
-## Bekannte Probleme / TODOs
+## Kontext-Management
 
-- [ ] Lazy-Grammar für Tool-Profil sobald llama.cpp API stabil
-- [ ] `/run` Live-Output (check_run gibt aktuell nur Gesamtausgabe zurück)
-- [ ] Kontext-Management: automatisches Zusammenfassen bei >80% Auslastung
+- **80%-Schwelle**: bei >80% Auslastung automatisch zusammenfassen
+- **`/summarize`**: manuell auslösen
+- **Strategie**: LLM fasst bisherige Konversation zusammen.
+  Neuer Kontext: System-Prompt + Zusammenfassung + letzte 2 Paare.
 
 ---
 
-## Konventionen
+## Git als Undo-System
 
-- **Sprache**: Code-Kommentare auf Deutsch, Tool-Descriptions auf Englisch
-- **Pfade**: immer relativ zur Sandbox-Root, kein automatischer `/build/`-Prefix
-- **Patterns**: MVP, Active Object, Command Dispatcher, Facade, State Machine
-- **Qt**: Signals/Slots für alles, kein direkter Thread-Zugriff
-- **Fehler**: immer per Signal nach oben, nie silent schlucken
+Sandbox = Git-Repo. Vor jedem schreibenden Tool-Call:
+```
+git add -A && git commit -m "auto: str_replace datei.cpp"
+```
+- `/undo`  → git checkout HEAD~1 -- <datei>
+- `/diff`  → git diff HEAD~1
+**Gesperrt**: push / pull / remote — nur für den User.
+
+---
+
+## Diff-Ansicht
+
+Unified-Diff als farbiger HTML-Block im toolView nach Datei-Änderungen:
+- Grün `.added`   — neue Zeilen
+- Rot `.removed`  — entfernte Zeilen
+- Grau `.context` — Kontext
+LCS-Algorithmus in Agent.cpp, kein externes Tool.
+
+---
+
+## Deadlock-Erkennung
+
+| Fehlerzahl | Eskalation                      |
+|------------|---------------------------------|
+| 3          | Warnung — Argumente prüfen      |
+| 5          | Umleitung — anderen Weg suchen  |
+| 7          | Abbruch — Erklärung an User     |
+
+---
+
+## Stop-Mechanismus
+
+`onStop()` inkrementiert `m_sessionId`. Alle Callbacks prüfen ihre
+gespeicherte ID — veraltete werden verworfen.
+Pattern: Generation Stamp.
+
+---
+
+## Offene TODOs
+
+### Implementiert ✓
+- [x] MVP-Architektur (MainWindow/Agent/ChatModel)
+- [x] MCP stdio JSON-RPC (McpClient/McpManager)
+- [x] Zwei Sampler-Profile (Chat/Tool)
+- [x] Thinking-Filter (<think>...</think>)
+- [x] Tool-Deadlock-Erkennung (3/5/7 Eskalation)
+- [x] JSON-Repair (kaputte Tool-Calls reparieren)
+- [x] Stop-Bug-Fix (Session-ID Pattern)
+- [x] Smart-Autoscroll (beide QTextEdit)
+- [x] Word-Wrap in toolView
+- [x] QTextEdit Eingabe (Shift+Enter = Umbruch)
+- [x] CommandProcessor (/init /build /compile /run)
+- [x] AGENT.md Projektgedächtnis
+
+### In Arbeit (diese Session) 🔨
+- [x] Kontext-Management (80%-Auto + /summarize)
+- [x] Git-Integration im filesystem MCP
+- [x] grep_code Tool (rekursive Code-Suche)
+- [x] tree Tool (rekursiver Verzeichnisbaum)
+- [x] Compile-Retry-Loop (3x automatisch)
+- [x] Diff-Ansicht im toolView (LCS, farbig)
+- [x] /undo + /diff Kommandos
+
+### Offen
+- [ ] Planner/Executor-Trennung
+- [ ] Token-Budget pro Tool-Call (intelligentes Kürzen)
+- [ ] Mehrere Dateien parallel
+- [ ] Automatische AGENT.md-Aktualisierung nach Session
+- [ ] Mehrere Modelle (klein/groß)
+- [ ] Live-Output bei /run
+- [ ] Persistentes Konversationsgedächtnis zwischen Sessions
+
+### Neue Ideen (noch nicht bewertet)
+
+#### Config-System (AppConfig / QSettings)
+- Zentrales Singleton `AppConfig` das alle Parameter hält und via `QSettings`
+  im Home-Verzeichnis persistiert (`~/.config/LlamaQt/LlamaQt.conf`)
+- Agent, LlamaWorker, McpManager werden mit Werten aus AppConfig initialisiert
+- Konfigurierbare Parameter (Vorschlag):
+  - Modellpfad
+  - Sampler-Parameter (TopK, Temp, TopP, MinP, Seed je Profil)
+  - Context-Größe (n_ctx), Batch-Size
+  - Summarize-Schwelle (aktuell 80%)
+  - Max Continuations (aktuell 3)
+  - Deadlock-Schwellen (3/5/7)
+  - Tavily API Key
+  - Sandbox-Pfad (aktuell ~/llamatools/)
+  - Logging-Einstellungen
+- **Übernahme laufender Einstellungen**: Zwei Klassen von Parametern:
+  - *Sofort wirksam*: Sampler-Werte, Schwellen, Logging → direkt übernehmen
+  - *Neustart nötig*: Modellpfad, n_ctx, Sandbox-Pfad → Agent herunterfahren,
+    neu aufsetzen (LlamaWorker::cleanup() + initialize())
+- Config-Dialog: modaler QDialog mit Tabs (Modell / Sampler / Agent / Logging)
+
+#### Chat-Logging
+- Chat in Datei loggen (HTML mit aufklappbaren Blöcken für Thinking/Tools,
+  oder plain Markdown)
+- Allgemeines Logging (qDebug → Datei, Log-Level konfigurierbar)
+
+#### Editor-Tabs
+- Separates Fenster (`QMainWindow` oder `QDockWidget`) mit `QTabWidget`
+- Jeder Tab = eine Datei aus der Sandbox (geladen via read_file MCP)
+- Einfacher Text-Editor (QPlainTextEdit, Monospace, Zeilennummern)
+- **Notify ans Modell**: wenn der User eine Datei im Editor ändert und speichert,
+  geht eine Systemnachricht in den Chat-Context:
+  `[User hat Datei 'foo.cpp' manuell bearbeitet. Bitte neu einlesen vor weiteren Änderungen.]`
+- Syntax-Highlighting: QSyntaxHighlighter für C++ (Basis-Keywords reichen)
+- Tab zeigt an ob Datei dirty (ungespeichert) ist
+
 
 ---
 
@@ -164,7 +275,3 @@ cd ~/llamaqt/build
 cmake .. -DLLAMA_BUILD_DIR=$HOME/ai/qLP/build -DLLAMA_SRC_DIR=$HOME/ai/qLP
 make -j$(nproc)
 ```
-
-## Modell-Pfad
-
-`src/MainWindow.h` → `MODEL_PATH`

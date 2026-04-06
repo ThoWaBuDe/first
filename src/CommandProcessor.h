@@ -53,6 +53,9 @@ private:
     ProcessResult handleBuild(const QStringList &args);
     ProcessResult handleCompile(const QStringList &args);
     ProcessResult handleRun(const QStringList &args);
+    ProcessResult handleSummarize(const QStringList &args);
+    ProcessResult handleUndo(const QStringList &args);
+    ProcessResult handleDiff(const QStringList &args);
 
     // Aktuelles Projekt (gesetzt durch /init)
     QString m_currentProject;

@@ -1,6 +1,9 @@
 #pragma once
 #include <QObject>
 #include <QThread>
+#include <QHash>
+#include <QJsonObject>
+#include <cstdint>
 #include "ChatModel.h"
 #include "McpManager.h"
 #include "LlamaWorker.h"
@@ -71,6 +74,14 @@ private:
     void filterToken(const QString &token);
     void emitStats();
 
+    // ─── Kontext-Management ───────────────────────────────────────────────
+    void checkContextUsage();   // >80% → auto-summarize
+    void summarizeContext();     // fasst Konversation zusammen, kürzt ChatModel
+
+    // ─── Diff-Ansicht (LCS) ───────────────────────────────────────────────
+    QString computeDiffHtml(const QString &before, const QString &after,
+                            const QString &filename) const;
+
     // Deadlock-Erkennung:
     // Kanonischer Schlüssel aus Tool-Name + Argumenten (sortiert)
     QString toolCallKey(const QString &toolName, const QJsonObject &args) const;
@@ -110,6 +121,10 @@ private:
     static constexpr int DEADLOCK_WARN     = 3;
     static constexpr int DEADLOCK_REDIRECT = 5;
     static constexpr int DEADLOCK_ABORT    = 7;
+
+    // ─── Kontext-Management ───────────────────────────────────────────────
+    bool m_summarizing = false;
+    static constexpr int CTX_SUMMARIZE_THRESHOLD = 80;  // % Auslastung
 
     // ─── Token-Statistik ──────────────────────────────────────────────────
     int m_generatedTokens = 0;
