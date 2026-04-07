@@ -1,23 +1,7 @@
-// ─── LlamaQt MCP Filesystem Server ───────────────────────────────────────────
-// Dateioperationen + Git-Integration in der Sandbox ~/llamatools/.
-//
-// Sicherheit:
-//   - Alle Pfade werden relativ zu ~/llamatools/ aufgelöst
-//   - Symlinks werden auf jeder Pfadebene abgelehnt
-//   - Git-Remote-Operationen (push/pull/remote) sind gesperrt
-//
-// Git als Undo-System:
-//   Vor jedem schreibenden Zugriff (write_file, append_file, str_replace)
-//   wird automatisch ein Git-Commit gemacht falls ein Repo vorhanden ist.
-//   Pattern: Auto-Checkpoint — jede Änderung ist rückgängig machbar.
-//
-// Neue Tools gegenüber v1.1:
-//   grep_code   — rekursive Code-Suche mit regulären Ausdrücken
-//   tree        — rekursiver Verzeichnisbaum
-//   git_status  — git status in der Sandbox
-//   git_diff    — git diff (working tree oder zwischen Commits)
-//   git_log     — git log (letzte N Commits)
-//   git_checkout— git checkout (Datei oder Commit, kein remote)
+// ─── LlamaQt MCP Filesystem Server v2.1 ─────────────────────────────────────
+// Dateioperationen + Git-Integration + patch_file (unified diff)
+// Sicherheit: Alle Pfade relativ zu ~/llamatools/, Symlinks verboten
+// Git: Auto-Checkpoint vor jeder schreibenden Operation
 
 #include <QCoreApplication>
 #include <QJsonDocument>
@@ -112,14 +96,8 @@ static void sendError(int id, int code, const QString &message)
 }
 
 // ─── Git helpers ─────────────────────────────────────────────────────────────
-
-// Ermittelt das Git-Repo-Verzeichnis für einen Pfad.
-// Strategie: Git-Repo ist das nächste Verzeichnis mit .git/ beim Hochgehen.
-// Falls keines gefunden → Projektverzeichnis (erster Subordner der Sandbox).
-// Damit hat jedes Projektverzeichnis sein eigenes Repo.
 static QString gitRepoForPath(const QString &path)
 {
-    // Von path aufwärts suchen bis .git/ gefunden oder sandboxRoot erreicht
     QDir dir(path);
     while (dir.absolutePath().startsWith(sandboxRoot())) {
         if (QDir(dir.absolutePath() + "/.git").exists())
@@ -127,9 +105,6 @@ static QString gitRepoForPath(const QString &path)
         if (!dir.cdUp()) break;
     }
 
-    // Kein Repo gefunden — Projektverzeichnis bestimmen:
-    // Erster Pfadbestandteil nach sandboxRoot ist das Projektverzeichnis.
-    // Beispiel: ~/llamatools/MeinProjekt/src/foo.cpp → ~/llamatools/MeinProjekt
     QString rel = path;
     if (rel.startsWith(sandboxRoot() + "/"))
         rel = rel.mid(sandboxRoot().length() + 1);
@@ -137,13 +112,9 @@ static QString gitRepoForPath(const QString &path)
     if (!projectName.isEmpty() && !projectName.contains('.'))
         return sandboxRoot() + "/" + projectName;
 
-    // Fallback: Sandbox-Root selbst
     return sandboxRoot();
 }
 
-// Initialisiert ein Git-Repo im Verzeichnis falls noch keines vorhanden.
-// Setzt auch user.name und user.email falls nicht global konfiguriert.
-// Gibt true zurück wenn Repo bereit (existierend oder neu angelegt).
 static bool ensureGitRepo(const QString &repoPath)
 {
     if (QDir(repoPath + "/.git").exists())
@@ -158,13 +129,6 @@ static bool ensureGitRepo(const QString &repoPath)
     if (!proc.waitForStarted(3000) || !proc.waitForFinished(5000))
         return false;
 
-    // Minimale Git-Konfiguration damit Commits funktionieren
-    // (git braucht user.name + user.email — nutzt global wenn vorhanden)
-    QProcess cfg;
-    cfg.setWorkingDirectory(repoPath);
-    cfg.setProcessChannelMode(QProcess::MergedChannels);
-
-    // Nur setzen wenn nicht global konfiguriert
     auto checkGlobal = [&](const QString &key) -> bool {
         QProcess p;
         p.start("git", {"config", "--global", key});
@@ -186,10 +150,7 @@ static bool ensureGitRepo(const QString &repoPath)
     return QDir(repoPath + "/.git").exists();
 }
 
-// Führt ein Git-Kommando in einem bestimmten Repo-Verzeichnis aus.
-// Gesperrte Subkommandos: push, pull, remote, fetch, clone.
-static std::pair<QString,int> runGitIn(const QString &repoPath,
-                                        const QStringList &args)
+static std::pair<QString,int> runGitIn(const QString &repoPath, const QStringList &args)
 {
     static const QStringList blocked = {"push","pull","remote","fetch","clone"};
     if (!args.isEmpty() && blocked.contains(args.first().toLower())) {
@@ -207,33 +168,25 @@ static std::pair<QString,int> runGitIn(const QString &repoPath,
     return {QString::fromUtf8(proc.readAll()).trimmed(), proc.exitCode()};
 }
 
-// Rückwärtskompatibel: runGit in sandboxRoot
 static std::pair<QString,int> runGit(const QStringList &args)
 {
     return runGitIn(sandboxRoot(), args);
 }
 
-// Auto-Commit vor schreibenden Operationen.
-// Initialisiert Git automatisch wenn noch kein Repo vorhanden.
-// Pattern: Auto-Checkpoint — transparent für den Aufrufer.
 static void autoCommit(const QString &filePath, const QString &message)
 {
     QString repoPath = gitRepoForPath(filePath);
-
-    // Git init falls nötig — Henne-Ei-Problem gelöst
     if (!ensureGitRepo(repoPath)) return;
 
     runGitIn(repoPath, {"add", "-A"});
 
-    // Nur committen wenn tatsächlich Änderungen vorhanden
     auto [diffOut, diffCode] = runGitIn(repoPath, {"diff", "--cached", "--quiet"});
     if (diffCode == 0) return;
 
     runGitIn(repoPath, {"commit", "-m", QString("auto: %1").arg(message)});
 }
 
-// ─── Bestehende Tool-Handler (read_file, write_file, etc.) ───────────────────
-// Identisch mit v1.1, nur write_file/append_file/str_replace haben autoCommit.
+// ─── Tool Handler ────────────────────────────────────────────────────────────
 
 static std::pair<QString,bool> handleReadFile(const QJsonObject &args)
 {
@@ -296,7 +249,6 @@ static std::pair<QString,bool> handleWriteFile(const QJsonObject &args)
     QString reason;
     if (!isPathAllowed(fullPath, reason)) return {reason, true};
 
-    // Auto-Checkpoint vor dem Überschreiben
     autoCommit(fullPath, QString("before write_file %1").arg(relPath));
 
     QFileInfo fi(fullPath);
@@ -364,7 +316,6 @@ static std::pair<QString,bool> handleStrReplace(const QJsonObject &args)
         return {QString("Error: 'old_str' found %1 times — not unique. "
                         "Add more context.").arg(count), true};
 
-    // Auto-Checkpoint vor der Änderung
     autoCommit(fullPath, QString("before str_replace %1").arg(relPath));
 
     content.replace(oldStr, newStr);
@@ -468,23 +419,6 @@ static std::pair<QString,bool> handleMkdir(const QJsonObject &args)
     return {QString("Error: Could not create '%1'.").arg(relPath), true};
 }
 
-// ─── NEUES TOOL: grep_code ───────────────────────────────────────────────────
-// Rekursive Code-Suche mit regulären Ausdrücken.
-//
-// Durchsucht alle Dateien in der Sandbox (oder einem Unterverzeichnis)
-// nach einem Muster. Gibt Dateiname + Zeilennummer + Trefferinhalt zurück.
-//
-// Parameter:
-//   pattern   — regulärer Ausdruck (Qt QRegularExpression)
-//   path      — Startverzeichnis (optional, default: Sandbox-Root)
-//   extension — Dateiendung filtern (optional, z.B. "cpp" oder "h,cpp")
-//   max_hits  — maximale Treffer (optional, default: 100)
-//
-// Warum QDirIterator statt QDir::entryList()?
-//   QDirIterator mit QDirIterator::Subdirectories traversiert den Baum
-//   ohne dass wir rekursiv programmieren müssen — Qt übernimmt die
-//   Traversierung intern. Analogie AVR: wie ein DMA-Transfer statt
-//   manueller Byte-Schleife.
 static std::pair<QString,bool> handleGrepCode(const QJsonObject &args)
 {
     QString pattern   = args.value("pattern").toString();
@@ -503,7 +437,6 @@ static std::pair<QString,bool> handleGrepCode(const QJsonObject &args)
     if (!re.isValid())
         return {QString("Error: invalid regex: %1").arg(re.errorString()), true};
 
-    // Dateiendungen parsen ("cpp" oder "h,cpp,txt")
     QStringList extensions;
     if (!extFilter.isEmpty()) {
         for (const QString &ext : extFilter.split(',', Qt::SkipEmptyParts))
@@ -524,14 +457,11 @@ static std::pair<QString,bool> handleGrepCode(const QJsonObject &args)
 
     while (it.hasNext() && !truncated) {
         QString filePath = it.next();
-
-        // Symlink-Check für jede gefundene Datei
         if (isSymlinkInPath(filePath)) continue;
 
         QFile file(filePath);
         if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
 
-        // Relativer Pfad für die Ausgabe (lesbarer)
         QString relFilePath = filePath;
         if (relFilePath.startsWith(sandboxRoot() + "/"))
             relFilePath = relFilePath.mid(sandboxRoot().length() + 1);
@@ -544,7 +474,6 @@ static std::pair<QString,bool> handleGrepCode(const QJsonObject &args)
             QString line = in.readLine();
             auto match = re.match(line);
             if (match.hasMatch()) {
-                // Zeile kürzen falls zu lang
                 QString display = line.trimmed();
                 if (display.length() > 120)
                     display = display.left(120) + "...";
@@ -573,24 +502,6 @@ static std::pair<QString,bool> handleGrepCode(const QJsonObject &args)
     return {output, false};
 }
 
-// ─── NEUES TOOL: tree ────────────────────────────────────────────────────────
-// Rekursiver Verzeichnisbaum — gibt dem Modell einen Überblick über die
-// gesamte Projektstruktur ohne jedes Verzeichnis einzeln auflisten zu müssen.
-//
-// Ausgabe-Format (Unix tree-ähnlich):
-//   MyProject/
-//   ├── CMakeLists.txt
-//   ├── src/
-//   │   ├── main.cpp
-//   │   └── Agent.cpp
-//   └── build/
-//       └── (leer)
-//
-// Implementierung: rekursive Hilfsfunktion mit Präfix-String.
-// Der Präfix wird bei jedem Rekursionsschritt erweitert:
-//   "│   " für nicht-letzte Einträge (weiterer Geschwister folgt)
-//   "    " für letzte Einträge (kein weiterer Geschwister)
-// Pattern: Composite — Verzeichnis und Datei werden uniform behandelt.
 static void buildTree(const QString &dirPath, const QString &prefix,
                       QStringList &lines, int depth, int maxDepth)
 {
@@ -600,7 +511,6 @@ static void buildTree(const QString &dirPath, const QString &prefix,
     }
 
     QDir dir(dirPath);
-    // .git verstecken — kein Nutzen für das Modell, aber viel Lärm
     QStringList entries = dir.entryList(
         QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden,
         QDir::Name | QDir::DirsFirst);
@@ -612,7 +522,6 @@ static void buildTree(const QString &dirPath, const QString &prefix,
         QString full  = dirPath + "/" + name;
         QFileInfo fi(full);
 
-        // Symlinks explizit markieren, nicht folgen
         if (fi.isSymLink()) {
             lines << prefix + (isLast ? "└── " : "├── ")
                      + name + " -> " + fi.symLinkTarget() + " [symlink]";
@@ -644,15 +553,12 @@ static std::pair<QString,bool> handleTree(const QJsonObject &args)
         return {"Error: Directory does not exist.", true};
 
     QStringList lines;
-    // Wurzel-Verzeichnis als erste Zeile
     QString rootName = relPath == "." ? "." : QFileInfo(fullPath).fileName();
     lines << rootName + "/";
     buildTree(fullPath, "", lines, 1, maxDepth);
 
     return {lines.join('\n'), false};
 }
-
-// ─── NEUE TOOLS: Git ─────────────────────────────────────────────────────────
 
 static std::pair<QString,bool> handleGitStatus(const QJsonObject &args)
 {
@@ -756,6 +662,123 @@ static std::pair<QString,bool> handleGitCheckout(const QJsonObject &args)
     return {msg, code != 0};
 }
 
+// ─── NEUES TOOL: patch_file ─────────────────────────────────────────────────
+static std::pair<QString,bool> handlePatchFile(const QJsonObject &args)
+{
+    QString relPath = args.value("path").toString();
+    QString patch   = args.value("diff").toString();
+
+    if (relPath.isEmpty()) return {"Error: 'path' is required.", true};
+    if (patch.isEmpty())   return {"Error: 'diff' is required (unified diff).", true};
+
+    QString fullPath = resolvePath(relPath);
+    QString reason;
+    if (!isPathAllowed(fullPath, reason)) return {reason, true};
+
+    QFile file(fullPath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {QString("Error: Cannot read file: %1").arg(relPath), true};
+
+    QString original = QTextStream(&file).readAll();
+    file.close();
+
+    // Auto-Commit VOR der Änderung
+    autoCommit(fullPath, QString("before patch_file %1").arg(relPath));
+
+    QStringList origLines = original.split('\n', Qt::KeepEmptyParts);
+    QStringList patchedLines = origLines;
+    QStringList patchLines = patch.split('\n', Qt::KeepEmptyParts);
+
+    int i = 0;
+    int appliedHunks = 0;
+    int totalHunks = 0;
+
+    while (i < patchLines.size()) {
+        QString line = patchLines[i];
+
+        // Überspringe Header-Zeilen wie --- +++ 
+        if (line.startsWith("---") || line.startsWith("+++") || line.startsWith("index ")) {
+            ++i;
+            continue;
+        }
+
+        if (!line.startsWith("@@ -")) {
+            ++i;
+            continue;
+        }
+
+        totalHunks++;
+
+        QRegularExpression re(R"(^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@)");
+        auto m = re.match(line);
+        if (!m.hasMatch()) {
+            ++i; continue;
+        }
+
+        int oldStart = m.captured(1).toInt() - 1;
+        ++i;
+
+        QStringList hunk;
+        while (i < patchLines.size() && !patchLines[i].startsWith("@@ ")) {
+            hunk << patchLines[i];
+            ++i;
+        }
+
+        // Hunk anwenden mit strenger Context-Prüfung
+        int cur = oldStart;
+        bool hunkApplied = true;
+
+        for (const QString &h : hunk) {
+            if (h.startsWith(' ') || h.startsWith('-')) {        // Context oder Delete
+                QString expected = h.mid(1);
+                if (cur >= patchedLines.size() || patchedLines[cur] != expected) {
+                    return {QString("Patch conflict in %1 at line %2\n"
+                                    "Expected: %3\n"
+                                    "Actual:   %4\n"
+                                    "Hunk failed. Please generate a new diff with more/fresher context.")
+                                .arg(relPath).arg(cur + 1)
+                                .arg(expected.left(100))
+                                .arg(patchedLines.value(cur).left(100)), true};
+                }
+                if (h.startsWith('-')) {
+                    patchedLines.removeAt(cur);   // Zeile löschen
+                    continue;
+                }
+                ++cur;
+            }
+            else if (h.startsWith('+')) {                         // Insert
+                patchedLines.insert(cur, h.mid(1));
+                ++cur;
+            }
+        }
+        appliedHunks++;
+    }
+
+    if (totalHunks == 0)
+        return {"Error: No valid @@ hunks found in the diff.", true};
+
+    if (appliedHunks < totalHunks)
+        return {QString("Partial failure: Only %1 of %2 hunks applied.")
+                    .arg(appliedHunks).arg(totalHunks), true};
+
+    // Erfolgreich → schreiben
+    QString newContent = patchedLines.join('\n');
+
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
+        return {"Error: Cannot write patched file.", true};
+
+    QTextStream(&file) << newContent;
+    file.close();
+
+    // Auto-Commit NACH der Änderung
+    autoCommit(fullPath, QString("patch_file %1").arg(relPath));
+
+    return {QString("OK: Successfully applied patch with %1 hunk(s) to '%2'\n"
+                    "Lines: %3 → %4")
+                .arg(appliedHunks).arg(relPath)
+                .arg(origLines.size()).arg(patchedLines.size()), false};
+}
+
 // ─── Tool-Liste ──────────────────────────────────────────────────────────────
 static QJsonArray makeToolList()
 {
@@ -774,7 +797,6 @@ static QJsonArray makeToolList()
     };
 
     return QJsonArray{
-        // ── Bestehende Tools ──────────────────────────────────────────────
         makeTool("read_file",
             "Read a file from the sandbox (~/llamatools/). "
             "Optional line range. Without range: max 4096 chars. "
@@ -824,12 +846,10 @@ static QJsonArray makeToolList()
             {{"path", makeProp("string", "Path relative to sandbox root")}},
             {"path"}),
 
-        // ── Neue Tools ────────────────────────────────────────────────────
         makeTool("grep_code",
             "Search for a regex pattern recursively in sandbox files. "
             "Returns filename:line:content for each match. "
-            "Use extension to filter by file type (e.g. 'cpp' or 'h,cpp'). "
-            "Essential for finding all usages of a symbol or string.",
+            "Use extension to filter by file type (e.g. 'cpp' or 'h,cpp').",
             {{"pattern",   makeProp("string",  "Regular expression to search for")},
              {"path",      makeProp("string",  "Start directory (default: sandbox root)")},
              {"extension", makeProp("string",  "File extensions to search, comma-separated (e.g. 'cpp,h')")},
@@ -845,15 +865,12 @@ static QJsonArray makeToolList()
             {}),
 
         makeTool("git_status",
-            "Show git status of the sandbox repository. "
-            "Requires git repo (created by /init).",
+            "Show git status of the sandbox repository.",
             {}, {}),
 
         makeTool("git_diff",
             "Show git diff in the sandbox. "
-            "Default: working tree vs last commit (HEAD). "
-            "Use from/to for commit range. Use stat_only for a summary. "
-            "Remote refs are not allowed.",
+            "Default: working tree vs last commit (HEAD).",
             {{"from",      makeProp("string",  "Start ref (commit hash, HEAD~1, etc.)")},
              {"to",        makeProp("string",  "End ref (optional)")},
              {"file",      makeProp("string",  "Limit diff to this file (optional)")},
@@ -868,11 +885,19 @@ static QJsonArray makeToolList()
 
         makeTool("git_checkout",
             "Restore a file or commit in the sandbox. "
-            "Use ref=HEAD~1 and file=path to undo last change to a file. "
             "Remote refs (origin, upstream) are not allowed.",
             {{"ref",  makeProp("string", "Git ref: commit hash, HEAD~1, etc. (default: HEAD~1)")},
-             {"file", makeProp("string", "File to restore (optional — omit for full checkout)")}},
-            {})
+             {"file", makeProp("string", "File to restore (optional)")}},
+            {}),
+
+        // NEU: patch_file
+        makeTool("patch_file",
+            "Apply a unified diff (git diff / diff -u format) to a single file. "
+            "Supports multiple hunks. Context must match exactly (safe). "
+            "Auto-commits before and after. Best tool for complex edits by LLM.",
+            {{"path", makeProp("string", "Path relative to sandbox root")},
+             {"diff", makeProp("string", "The full unified diff text (including @@ hunks)")}},
+            {"path", "diff"})
     };
 }
 
@@ -884,7 +909,6 @@ int main(int argc, char *argv[])
 
     QJsonArray tools = makeToolList();
     QTextStream in(stdin);
-    QTextStream err(stderr);
 
     while (!in.atEnd()) {
         QString line = in.readLine().trimmed();
@@ -893,21 +917,19 @@ int main(int argc, char *argv[])
         QJsonParseError parseErr;
         QJsonDocument doc = QJsonDocument::fromJson(line.toUtf8(), &parseErr);
         if (parseErr.error != QJsonParseError::NoError) {
-            err << "JSON parse error: " << parseErr.errorString() << "\n";
-            err.flush();
+            std::cerr << "JSON parse error: " << parseErr.errorString().toStdString() << std::endl;
             continue;
         }
 
         QJsonObject msg = doc.object();
-        QString method  = msg.value("method").toString();
-        bool hasId      = msg.contains("id");
-        int  id         = msg.value("id").toInt(-1);
+        QString method = msg.value("method").toString();
+        int id = msg.value("id").toInt(-1);
 
         if (method == "initialize") {
             sendResponse({{"jsonrpc","2.0"},{"id",id},{"result",QJsonObject{
                 {"protocolVersion","2024-11-05"},
-                {"capabilities",   QJsonObject{}},
-                {"serverInfo",     QJsonObject{{"name","llamaqt-filesystem"},{"version","2.0"}}}
+                {"capabilities", QJsonObject{}},
+                {"serverInfo", QJsonObject{{"name","llamaqt-filesystem"},{"version","2.1"}}}
             }}});
             continue;
         }
@@ -925,26 +947,29 @@ int main(int argc, char *argv[])
             QJsonObject toolArgs = params.value("arguments").toObject();
 
             std::pair<QString,bool> result;
-            if      (toolName == "read_file")    result = handleReadFile(toolArgs);
-            else if (toolName == "write_file")   result = handleWriteFile(toolArgs);
-            else if (toolName == "append_file")  result = handleAppendFile(toolArgs);
-            else if (toolName == "str_replace")  result = handleStrReplace(toolArgs);
-            else if (toolName == "list_dir")     result = handleListDir(toolArgs);
-            else if (toolName == "list_symbols") result = handleListSymbols(toolArgs);
-            else if (toolName == "mkdir")        result = handleMkdir(toolArgs);
-            else if (toolName == "grep_code")    result = handleGrepCode(toolArgs);
-            else if (toolName == "tree")         result = handleTree(toolArgs);
-            else if (toolName == "git_status")   result = handleGitStatus(toolArgs);
-            else if (toolName == "git_diff")     result = handleGitDiff(toolArgs);
-            else if (toolName == "git_log")      result = handleGitLog(toolArgs);
-            else if (toolName == "git_checkout") result = handleGitCheckout(toolArgs);
+
+            if      (toolName == "read_file")     result = handleReadFile(toolArgs);
+            else if (toolName == "write_file")    result = handleWriteFile(toolArgs);
+            else if (toolName == "append_file")   result = handleAppendFile(toolArgs);
+            else if (toolName == "str_replace")   result = handleStrReplace(toolArgs);
+            else if (toolName == "list_dir")      result = handleListDir(toolArgs);
+            else if (toolName == "list_symbols")  result = handleListSymbols(toolArgs);
+            else if (toolName == "mkdir")         result = handleMkdir(toolArgs);
+            else if (toolName == "grep_code")     result = handleGrepCode(toolArgs);
+            else if (toolName == "tree")          result = handleTree(toolArgs);
+            else if (toolName == "git_status")    result = handleGitStatus(toolArgs);
+            else if (toolName == "git_diff")      result = handleGitDiff(toolArgs);
+            else if (toolName == "git_log")       result = handleGitLog(toolArgs);
+            else if (toolName == "git_checkout")  result = handleGitCheckout(toolArgs);
+            else if (toolName == "patch_file")    result = handlePatchFile(toolArgs);
             else result = {QString("Unknown tool: '%1'").arg(toolName), true};
 
             sendResult(id, result.first, result.second);
             continue;
         }
 
-        if (hasId) sendError(id, -32601, QString("Method not found: %1").arg(method));
+        if (id != -1)
+            sendError(id, -32601, QString("Method not found: %1").arg(method));
     }
     return 0;
 }

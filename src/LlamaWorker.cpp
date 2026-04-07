@@ -84,6 +84,8 @@ void LlamaWorker::rebuildSamplers()
 // ─── initialize ──────────────────────────────────────────────────────────────
 void LlamaWorker::initialize(const QString &modelPath)
 {
+    qDebug() << "ModellPfad: " << modelPath;
+
     cleanup();
 
     llama_backend_init();
