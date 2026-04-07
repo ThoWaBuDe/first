@@ -1,13 +1,18 @@
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
+#include "AppConfig.h"
 #include <QScrollBar>
 #include <QTextCursor>
 #include <QKeyEvent>
+#include <QMenuBar>
+#include <QMenu>
+#include <QAction>
+#include <QMetaObject>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
-    , m_agent(new Agent(MODEL_PATH, this))
+    , m_agent(new Agent(AppConfig::instance().modelPath(), this))
 {
     setupUi();
     setupConnections();
@@ -90,6 +95,21 @@ void MainWindow::setupUi()
     ui->statusLabel->setStyleSheet("color: #888; font-size: 11px;");
     ui->statsLabel->setStyleSheet(
         "color: #555; font-size: 11px; font-family: monospace;");
+
+    // ─── Menü-Bar ─────────────────────────────────────────────────────────
+    // Einfaches Menü: nur Datei und Einstellungen.
+    // Qt erstellt die Menü-Bar automatisch als Teil von QMainWindow.
+    QMenu *fileMenu = menuBar()->addMenu("&Datei");
+
+    QAction *settingsAction = fileMenu->addAction("⚙ Einstellungen...");
+    settingsAction->setShortcut(QKeySequence("Ctrl+,"));
+    connect(settingsAction, &QAction::triggered, this, &MainWindow::onSettingsClicked);
+
+    fileMenu->addSeparator();
+
+    QAction *quitAction = fileMenu->addAction("Beenden");
+    quitAction->setShortcut(QKeySequence::Quit);
+    connect(quitAction, &QAction::triggered, this, &QMainWindow::close);
 }
 
 // ─── eventFilter ─────────────────────────────────────────────────────────────
@@ -269,4 +289,30 @@ void MainWindow::onStatsUpdated(int promptTokens, int generatedTokens,
     ui->statsLabel->setStyleSheet(
         QString("color: %1; font-size: 11px; font-family: monospace;")
         .arg(color));
+}
+
+// ─── onSettingsClicked ───────────────────────────────────────────────────────
+// Öffnet den Config-Dialog modal.
+// Nach OK werden sofort-wirksame Änderungen weitergegeben:
+//   - Sampler geändert → LlamaWorker::rebuildSamplers() im Worker-Thread
+//   - Logging geändert → Agent::m_logger aktivieren/deaktivieren
+// Neustart-nötige Änderungen (Modellpfad, n_ctx) zeigt der Dialog selbst
+// als Hinweis — MainWindow muss nichts extra tun.
+void MainWindow::onSettingsClicked()
+{
+    ConfigDialog dlg(this);
+
+    // Sampler-Änderungen → Worker-Thread neu bauen
+    connect(&dlg, &ConfigDialog::samplersChanged, this, [this]() {
+        // invokeMethod weil rebuildSamplers im Worker-Thread laufen muss
+        QMetaObject::invokeMethod(m_agent->worker(), "rebuildSamplers",
+                                  Qt::QueuedConnection);
+        emit m_agent->appendTools(
+            "Sampler neu gebaut mit aktuellen Einstellungen.", "system");
+    });
+
+    // Logging-Änderungen → direkt wirksam via AppConfig Signal
+    // (ChatLogger ist bereits mit AppConfig::chatLoggingChanged verbunden)
+
+    dlg.exec();
 }

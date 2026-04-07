@@ -3,7 +3,6 @@
 #include <QScrollBar>
 #include <QEvent>
 #include "Agent.h"
-#include "ConfigDialog.h"
 
 namespace Ui { class MainWindow; }
 
@@ -27,7 +26,6 @@ private slots:
     // UI-Events
     void onSendClicked();
     void onClearToolsClicked();
-    void onSettingsClicked();
 
     // Agent → UI
     void onAppendChat(const QString &html, const QString &cssClass);
@@ -41,13 +39,19 @@ private:
     void setupUi();
     void setupConnections();
 
+    // Smart-Autoscroll: true wenn Scrollbar am Ende (oder nah dran)
+    // Schwelle: 20px vom Maximum — fängt leichtes Überschiessen ab
     bool isScrolledToBottom(QScrollBar *sb) const;
+
+    // Autoscroll wenn am Ende
     void scrollToBottomIfNeeded(QScrollBar *sb);
 
     Ui::MainWindow *ui;
     Agent          *m_agent;
 
-    // MODEL_PATH kommt jetzt aus AppConfig — nicht mehr hardcodiert hier.
+    static constexpr const char *MODEL_PATH =
+        "/home/thomas/ai/models/gemma-4-26B-A4B-it-heretic.Q3_K_M.gguf";
 
+    // Schwelle in Pixel — innerhalb dieser Distanz zum Ende → Autoscroll
     static constexpr int AUTOSCROLL_THRESHOLD = 20;
 };

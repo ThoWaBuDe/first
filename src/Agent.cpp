@@ -42,6 +42,16 @@ void Agent::start()
 {
     m_workerThread.start();
 
+    // Logger aus AppConfig konfigurieren
+    AppConfig &cfg = AppConfig::instance();
+    m_logger.setEnabled(cfg.chatLoggingEnabled());
+    if (!cfg.chatLogDir().isEmpty())
+        m_logger.setLogDir(cfg.chatLogDir());
+
+    // AppConfig-Änderungen live übernehmen
+    connect(&cfg, &AppConfig::chatLoggingChanged,
+            &m_logger, &ChatLogger::setEnabled);
+
     QString binDir = QCoreApplication::applicationDirPath();
     m_mcp.addServer(binDir + "/mcp-servers/filesystem/llamaqt-filesystem");
     m_mcp.addServer(binDir + "/mcp-servers/sysinfo/llamaqt-sysinfo");
@@ -113,6 +123,7 @@ void Agent::onUserMessage(const QString &text)
     // Kontext-Check bevor neue Nachricht hinzugefügt wird
     checkContextUsage();
 
+    m_logger.logUser(text);
     m_chatModel.addUserMessage(text);
     emit appendChat(QString("<b>Du:</b> %1").arg(text.toHtmlEscaped()), "user");
     emit appendChat("<b>Assistent:</b> ", "assistant");
@@ -307,6 +318,7 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     // ─── Fall C: Normale Antwort ──────────────────────────────────────────
     m_chatModel.addAssistantMessage(fullResponse);
+    m_logger.logAssistant(fullResponse);
     emit inputEnabled(true);
     emit statusChanged("Bereit");
 }
@@ -489,6 +501,9 @@ void Agent::handleToolCall(const QString &fullResponse, uint32_t sessionId)
     QString     toolName = doc.object().value("name").toString();
     QJsonObject toolArgs = doc.object().value("arguments").toObject();
 
+    m_logger.logToolCall(toolName,
+        QString::fromUtf8(QJsonDocument(toolArgs).toJson(QJsonDocument::Indented)));
+
     emit appendTools(
         QString("<b>Tool-Call: %1</b><br><pre>%2</pre>")
         .arg(toolName.toHtmlEscaped(),
@@ -527,6 +542,26 @@ void Agent::handleToolCall(const QString &fullResponse, uint32_t sessionId)
 
             QString toolResult = error.isEmpty() ? result : ("Fehler: " + error);
             bool    isErr      = !error.isEmpty();
+
+            // ── Token-Budget: Tool-Ergebnis kürzen ───────────────────────
+            // Sehr lange Tool-Ausgaben (Compiler-Logs, grep-Treffer, git diff)
+            // können den Kontext fluten. Wir kürzen auf MAX_TOOL_RESULT_CHARS
+            // und hängen einen Hinweis an damit das Modell weiß was fehlt.
+            //
+            // Warum hier kürzen statt im MCP-Server?
+            //   Der MCP-Server kennt sein Budget nicht — er gibt immer alles.
+            //   Der Agent kennt den Kontext und entscheidet wie viel sinnvoll ist.
+            //   Das ist die richtige Ebene für diese Entscheidung.
+            if (!isErr && toolResult.length() > AppConfig::instance().maxToolResultChars()) {
+                int maxChars = AppConfig::instance().maxToolResultChars();
+                int cut = toolResult.lastIndexOf('\n', maxChars);
+                if (cut < maxChars / 2) cut = maxChars;
+                toolResult = toolResult.left(cut)
+                    + QString("\n\n[... gekürzt: %1 von %2 Zeichen angezeigt. "
+                              "Nutze start_line, max_hits oder stat_only:true "
+                              "für gezieltere Abfragen.]")
+                      .arg(cut).arg(result.length());
+            }
 
             // ── Deadlock-Erkennung ────────────────────────────────────────
             // Bei Fehler: Zähler erhöhen und Eskalation prüfen.
@@ -579,6 +614,8 @@ void Agent::handleToolCall(const QString &fullResponse, uint32_t sessionId)
                 QString("<b>Ergebnis [%1]:</b><br><pre>%2</pre>")
                 .arg(toolName.toHtmlEscaped(), toolResult.toHtmlEscaped()),
                 isErr ? "error" : "tool");
+
+            m_logger.logToolResult(toolName, toolResult, isErr);
 
             // ── Diff-Anzeige für dateiändernde Tools ─────────────────────
             // Bei str_replace, write_file, append_file: git diff anzeigen.
@@ -666,6 +703,8 @@ void Agent::filterToken(const QString &token)
                 .arg(thinkText.toHtmlEscaped()),
                 "think");
 
+            m_logger.logThinking(thinkText);
+
             m_inThinkBlock = false;
             m_thinkBuffer.clear();
         }
@@ -691,13 +730,14 @@ void Agent::checkContextUsage()
 {
     if (m_summarizing || m_ctxSize == 0) return;
 
-    int used = m_promptTokens + m_generatedTokens;
-    int pct  = (used * 100) / m_ctxSize;
+    int used      = m_promptTokens + m_generatedTokens;
+    int pct       = (used * 100) / m_ctxSize;
+    int threshold = AppConfig::instance().summarizeThreshold();
 
-    if (pct >= CTX_SUMMARIZE_THRESHOLD) {
+    if (pct >= threshold) {
         emit appendTools(
-            QString("<b>Kontext bei %1% — automatisches Zusammenfassen...</b>")
-            .arg(pct), "system");
+            QString("<b>Kontext bei %1% (Schwelle: %2%) — automatisches Zusammenfassen...</b>")
+            .arg(pct).arg(threshold), "system");
         summarizeContext();
     }
 }

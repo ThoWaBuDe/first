@@ -113,55 +113,123 @@ static void sendError(int id, int code, const QString &message)
 
 // ─── Git helpers ─────────────────────────────────────────────────────────────
 
-// Prüft ob die Sandbox ein Git-Repo ist
-static bool hasGitRepo()
+// Ermittelt das Git-Repo-Verzeichnis für einen Pfad.
+// Strategie: Git-Repo ist das nächste Verzeichnis mit .git/ beim Hochgehen.
+// Falls keines gefunden → Projektverzeichnis (erster Subordner der Sandbox).
+// Damit hat jedes Projektverzeichnis sein eigenes Repo.
+static QString gitRepoForPath(const QString &path)
 {
-    return QDir(sandboxRoot() + "/.git").exists();
+    // Von path aufwärts suchen bis .git/ gefunden oder sandboxRoot erreicht
+    QDir dir(path);
+    while (dir.absolutePath().startsWith(sandboxRoot())) {
+        if (QDir(dir.absolutePath() + "/.git").exists())
+            return dir.absolutePath();
+        if (!dir.cdUp()) break;
+    }
+
+    // Kein Repo gefunden — Projektverzeichnis bestimmen:
+    // Erster Pfadbestandteil nach sandboxRoot ist das Projektverzeichnis.
+    // Beispiel: ~/llamatools/MeinProjekt/src/foo.cpp → ~/llamatools/MeinProjekt
+    QString rel = path;
+    if (rel.startsWith(sandboxRoot() + "/"))
+        rel = rel.mid(sandboxRoot().length() + 1);
+    QString projectName = rel.section('/', 0, 0);
+    if (!projectName.isEmpty() && !projectName.contains('.'))
+        return sandboxRoot() + "/" + projectName;
+
+    // Fallback: Sandbox-Root selbst
+    return sandboxRoot();
 }
 
-// Führt ein Git-Kommando in der Sandbox aus.
-// Gesperrte Subkommandos: push, pull, remote, fetch, clone.
-// Gibt {stdout+stderr, exitCode} zurück.
-static std::pair<QString,int> runGit(const QStringList &args)
+// Initialisiert ein Git-Repo im Verzeichnis falls noch keines vorhanden.
+// Setzt auch user.name und user.email falls nicht global konfiguriert.
+// Gibt true zurück wenn Repo bereit (existierend oder neu angelegt).
+static bool ensureGitRepo(const QString &repoPath)
 {
-    // Sicherheit: Remote-Operationen sperren
+    if (QDir(repoPath + "/.git").exists())
+        return true;
+
+    QDir().mkpath(repoPath);
+
+    QProcess proc;
+    proc.setWorkingDirectory(repoPath);
+    proc.setProcessChannelMode(QProcess::MergedChannels);
+    proc.start("git", {"init"});
+    if (!proc.waitForStarted(3000) || !proc.waitForFinished(5000))
+        return false;
+
+    // Minimale Git-Konfiguration damit Commits funktionieren
+    // (git braucht user.name + user.email — nutzt global wenn vorhanden)
+    QProcess cfg;
+    cfg.setWorkingDirectory(repoPath);
+    cfg.setProcessChannelMode(QProcess::MergedChannels);
+
+    // Nur setzen wenn nicht global konfiguriert
+    auto checkGlobal = [&](const QString &key) -> bool {
+        QProcess p;
+        p.start("git", {"config", "--global", key});
+        p.waitForFinished(2000);
+        return p.exitCode() == 0 && !QString::fromUtf8(p.readAll()).trimmed().isEmpty();
+    };
+
+    if (!checkGlobal("user.name")) {
+        QProcess p; p.setWorkingDirectory(repoPath);
+        p.start("git", {"config", "user.name", "LlamaQt"});
+        p.waitForFinished(2000);
+    }
+    if (!checkGlobal("user.email")) {
+        QProcess p; p.setWorkingDirectory(repoPath);
+        p.start("git", {"config", "user.email", "llamaqt@local"});
+        p.waitForFinished(2000);
+    }
+
+    return QDir(repoPath + "/.git").exists();
+}
+
+// Führt ein Git-Kommando in einem bestimmten Repo-Verzeichnis aus.
+// Gesperrte Subkommandos: push, pull, remote, fetch, clone.
+static std::pair<QString,int> runGitIn(const QString &repoPath,
+                                        const QStringList &args)
+{
     static const QStringList blocked = {"push","pull","remote","fetch","clone"};
     if (!args.isEmpty() && blocked.contains(args.first().toLower())) {
-        return {QString("Error: git %1 is not allowed (remote operations "
-                        "are reserved for the user).").arg(args.first()), 1};
+        return {QString("Error: git %1 is not allowed.").arg(args.first()), 1};
     }
 
     QProcess proc;
-    proc.setWorkingDirectory(sandboxRoot());
+    proc.setWorkingDirectory(repoPath);
     proc.setProcessChannelMode(QProcess::MergedChannels);
     proc.start("git", args);
 
-    if (!proc.waitForStarted(3000))
-        return {"Error: could not start git.", 1};
-    if (!proc.waitForFinished(15000))  {
-        proc.kill();
-        return {"Error: git timeout.", 1};
-    }
+    if (!proc.waitForStarted(3000)) return {"Error: could not start git.", 1};
+    if (!proc.waitForFinished(15000)) { proc.kill(); return {"Error: git timeout.", 1}; }
 
     return {QString::fromUtf8(proc.readAll()).trimmed(), proc.exitCode()};
 }
 
-// Auto-Commit vor schreibenden Operationen.
-// Macht nichts wenn kein Git-Repo vorhanden (graceful degradation).
-// Pattern: Auto-Checkpoint — transparent für den Aufrufer.
-static void autoCommit(const QString &message)
+// Rückwärtskompatibel: runGit in sandboxRoot
+static std::pair<QString,int> runGit(const QStringList &args)
 {
-    if (!hasGitRepo()) return;
+    return runGitIn(sandboxRoot(), args);
+}
 
-    // git add -A: alle Änderungen stagen (neue, geänderte, gelöschte Dateien)
-    runGit({"add", "-A"});
+// Auto-Commit vor schreibenden Operationen.
+// Initialisiert Git automatisch wenn noch kein Repo vorhanden.
+// Pattern: Auto-Checkpoint — transparent für den Aufrufer.
+static void autoCommit(const QString &filePath, const QString &message)
+{
+    QString repoPath = gitRepoForPath(filePath);
 
-    // Commit nur wenn es tatsächlich etwas zu committen gibt
-    // git diff --cached --quiet: exit 0 = nichts, exit 1 = Änderungen vorhanden
-    auto [diffOut, diffCode] = runGit({"diff", "--cached", "--quiet"});
-    if (diffCode == 0) return;  // nichts zu committen
+    // Git init falls nötig — Henne-Ei-Problem gelöst
+    if (!ensureGitRepo(repoPath)) return;
 
-    runGit({"commit", "-m", QString("auto: %1").arg(message)});
+    runGitIn(repoPath, {"add", "-A"});
+
+    // Nur committen wenn tatsächlich Änderungen vorhanden
+    auto [diffOut, diffCode] = runGitIn(repoPath, {"diff", "--cached", "--quiet"});
+    if (diffCode == 0) return;
+
+    runGitIn(repoPath, {"commit", "-m", QString("auto: %1").arg(message)});
 }
 
 // ─── Bestehende Tool-Handler (read_file, write_file, etc.) ───────────────────
@@ -229,7 +297,7 @@ static std::pair<QString,bool> handleWriteFile(const QJsonObject &args)
     if (!isPathAllowed(fullPath, reason)) return {reason, true};
 
     // Auto-Checkpoint vor dem Überschreiben
-    autoCommit(QString("before write_file %1").arg(relPath));
+    autoCommit(fullPath, QString("before write_file %1").arg(relPath));
 
     QFileInfo fi(fullPath);
     QDir().mkpath(fi.absolutePath());
@@ -239,7 +307,7 @@ static std::pair<QString,bool> handleWriteFile(const QJsonObject &args)
         return {QString("Error: Cannot write: %1").arg(relPath), true};
 
     QTextStream(&file) << content;
-    autoCommit(QString("write_file %1").arg(relPath));
+    autoCommit(fullPath, QString("write_file %1").arg(relPath));
     return {QString("OK: %1 bytes written to '%2'.").arg(content.length()).arg(relPath), false};
 }
 
@@ -264,7 +332,7 @@ static std::pair<QString,bool> handleAppendFile(const QJsonObject &args)
 
     QTextStream(&file) << content;
     qint64 total = file.size();
-    autoCommit(QString("append_file %1").arg(relPath));
+    autoCommit(fullPath, QString("append_file %1").arg(relPath));
     return {QString("OK: %1 bytes appended to '%2' (total: %3 bytes).")
             .arg(content.length()).arg(relPath).arg(total), false};
 }
@@ -297,14 +365,14 @@ static std::pair<QString,bool> handleStrReplace(const QJsonObject &args)
                         "Add more context.").arg(count), true};
 
     // Auto-Checkpoint vor der Änderung
-    autoCommit(QString("before str_replace %1").arg(relPath));
+    autoCommit(fullPath, QString("before str_replace %1").arg(relPath));
 
     content.replace(oldStr, newStr);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text))
         return {"Error: Cannot write file.", true};
     QTextStream(&file) << content;
 
-    autoCommit(QString("str_replace %1").arg(relPath));
+    autoCommit(fullPath, QString("str_replace %1").arg(relPath));
     return {QString("OK: replaced %1 line(s) with %2 line(s) in '%3'.")
             .arg(oldStr.count('\n')+1).arg(newStr.count('\n')+1).arg(relPath), false};
 }
@@ -586,29 +654,36 @@ static std::pair<QString,bool> handleTree(const QJsonObject &args)
 
 // ─── NEUE TOOLS: Git ─────────────────────────────────────────────────────────
 
-static std::pair<QString,bool> handleGitStatus(const QJsonObject &)
+static std::pair<QString,bool> handleGitStatus(const QJsonObject &args)
 {
-    if (!hasGitRepo())
-        return {"No git repository in sandbox. Use /init to create one.", true};
+    QString relPath  = args.value("path").toString(".");
+    QString fullPath = resolvePath(relPath);
+    QString repoPath = gitRepoForPath(fullPath);
 
-    auto [out, code] = runGit({"status", "--short", "--branch"});
-    return {out.isEmpty() ? "Working tree clean." : out, code != 0};
+    if (!QDir(repoPath + "/.git").exists())
+        return {QString("No git repository for '%1'. "
+                        "Use /init or write a file to auto-init.").arg(relPath), true};
+
+    auto [out, code] = runGitIn(repoPath, {"status", "--short", "--branch"});
+    return {QString("Repo: %1\n%2").arg(repoPath, out.isEmpty() ? "Working tree clean." : out),
+            code != 0};
 }
 
 static std::pair<QString,bool> handleGitDiff(const QJsonObject &args)
 {
-    if (!hasGitRepo())
-        return {"No git repository in sandbox.", true};
+    QString relPath  = args.value("path").toString(".");
+    QString fullPath = resolvePath(relPath);
+    QString repoPath = gitRepoForPath(fullPath);
+
+    if (!QDir(repoPath + "/.git").exists())
+        return {"No git repository found.", true};
 
     QString from = args.value("from").toString();
     QString to   = args.value("to").toString();
     QString file = args.value("file").toString();
+    bool statOnly = args.value("stat_only").toBool(false);
 
     QStringList gitArgs = {"diff"};
-
-    // --stat gibt eine kompakte Zusammenfassung (geänderte Dateien + Zeilen)
-    // Ohne --stat: vollständiger Diff (kann sehr lang werden)
-    bool statOnly = args.value("stat_only").toBool(false);
     if (statOnly) gitArgs << "--stat";
 
     if (!from.isEmpty() && !to.isEmpty())
@@ -616,7 +691,7 @@ static std::pair<QString,bool> handleGitDiff(const QJsonObject &args)
     else if (!from.isEmpty())
         gitArgs << from;
     else
-        gitArgs << "HEAD";  // Default: working tree vs. letzter Commit
+        gitArgs << "HEAD";
 
     if (!file.isEmpty()) {
         QString fullFile = resolvePath(file);
@@ -625,10 +700,9 @@ static std::pair<QString,bool> handleGitDiff(const QJsonObject &args)
         gitArgs << "--" << fullFile;
     }
 
-    auto [out, code] = runGit(gitArgs);
+    auto [out, code] = runGitIn(repoPath, gitArgs);
     if (out.isEmpty()) return {"No differences found.", false};
 
-    // Diff kürzen falls zu lang (Modell-Kontext schonen)
     if (out.length() > 8000)
         out = out.left(8000) + "\n[... truncated. Use stat_only:true for summary.]";
 
@@ -637,38 +711,36 @@ static std::pair<QString,bool> handleGitDiff(const QJsonObject &args)
 
 static std::pair<QString,bool> handleGitLog(const QJsonObject &args)
 {
-    if (!hasGitRepo())
-        return {"No git repository in sandbox.", true};
+    QString relPath  = args.value("path").toString(".");
+    QString fullPath = resolvePath(relPath);
+    QString repoPath = gitRepoForPath(fullPath);
 
-    int n = args.value("n").toInt(10);
-    n = qBound(1, n, 50);
+    if (!QDir(repoPath + "/.git").exists())
+        return {"No git repository found.", true};
 
-    // --oneline: kompaktes Format "abc1234 commit message"
-    auto [out, code] = runGit({"log", "--oneline", QString("-%1").arg(n)});
+    int n = qBound(1, args.value("n").toInt(10), 50);
+
+    auto [out, code] = runGitIn(repoPath, {"log", "--oneline", QString("-%1").arg(n)});
     if (out.isEmpty()) return {"No commits yet.", false};
     return {out, code != 0};
 }
 
-// git_checkout: Datei oder Commit zurücksetzen.
-// Gesperrt: alles was mit remote zu tun hat.
-// Erlaubt:
-//   - git checkout HEAD~1 -- datei.cpp  (Datei auf vorigen Commit)
-//   - git checkout <hash> -- datei.cpp  (Datei auf bestimmten Commit)
-//   - git checkout <hash>               (Detached HEAD — für Inspektion)
 static std::pair<QString,bool> handleGitCheckout(const QJsonObject &args)
 {
-    if (!hasGitRepo())
-        return {"No git repository in sandbox.", true};
+    QString relPath  = args.value("path").toString(".");
+    QString fullPath = resolvePath(relPath);
+    QString repoPath = gitRepoForPath(fullPath);
+
+    if (!QDir(repoPath + "/.git").exists())
+        return {"No git repository found.", true};
 
     QString ref  = args.value("ref").toString("HEAD~1");
     QString file = args.value("file").toString();
 
-    // Sicherheit: keine remote-refs erlauben
     if (ref.contains("origin") || ref.contains("upstream") || ref.startsWith("refs/remotes"))
         return {"Error: remote refs are not allowed.", true};
 
     QStringList gitArgs = {"checkout", ref};
-
     if (!file.isEmpty()) {
         QString fullFile = resolvePath(file);
         QString reason;
@@ -676,10 +748,10 @@ static std::pair<QString,bool> handleGitCheckout(const QJsonObject &args)
         gitArgs << "--" << fullFile;
     }
 
-    auto [out, code] = runGit(gitArgs);
+    auto [out, code] = runGitIn(repoPath, gitArgs);
     QString msg = code == 0
-        ? QString("OK: checked out '%1'%2.")
-          .arg(ref, file.isEmpty() ? "" : QString(" -- %1").arg(file))
+        ? QString("OK: checked out '%1'%2 in %3.")
+          .arg(ref, file.isEmpty() ? "" : " -- " + file, repoPath)
         : out;
     return {msg, code != 0};
 }

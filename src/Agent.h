@@ -8,6 +8,8 @@
 #include "McpManager.h"
 #include "LlamaWorker.h"
 #include "CommandProcessor.h"
+#include "ChatLogger.h"
+#include "AppConfig.h"
 
 // ─── Agent ────────────────────────────────────────────────────────────────────
 // Pattern: Presenter aus MVP (Model-View-Presenter).
@@ -46,6 +48,9 @@ public:
     ~Agent() override;
 
     void start();
+
+    // Zugriff auf Worker für MainWindow (rebuildSamplers via invokeMethod)
+    LlamaWorker *worker() const { return m_worker; }
 
 public slots:
     void onUserMessage(const QString &text);
@@ -97,6 +102,7 @@ private:
     ChatModel         m_chatModel;
     McpManager        m_mcp;
     CommandProcessor  m_commands;
+    ChatLogger        m_logger;
     QThread           m_workerThread;
     LlamaWorker      *m_worker = nullptr;
 
@@ -112,6 +118,11 @@ private:
     bool    m_inThinkBlock      = false;
     int     m_continuationCount = 0;
     static constexpr int MAX_CONTINUATIONS = 3;
+
+    // ─── Token-Budget ─────────────────────────────────────────────────────
+    // Maximale Länge eines Tool-Ergebnisses bevor es gekürzt wird.
+    // 6000 Zeichen ≈ ~1500 Tokens — großzügig aber nicht kontextflutend.
+    static constexpr int MAX_TOOL_RESULT_CHARS = 6000;
 
     // ─── Deadlock-Tracking ────────────────────────────────────────────────
     // Zählt aufeinanderfolgende Fehler pro Tool-Call-Schlüssel.

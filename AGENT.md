@@ -218,6 +218,17 @@ Pattern: Generation Stamp.
 - [x] Compile-Retry-Loop (3x automatisch)
 - [x] Diff-Ansicht im toolView (LCS, farbig)
 - [x] /undo + /diff Kommandos
+- [x] Token-Budget (Tool-Ergebnisse kürzen, konfigurierbar)
+- [x] Chat-Logging in Markdown (ChatLogger)
+- [x] AppConfig / QSettings (Singleton, INI-Format)
+- [x] gpu_info Tool (nvidia-smi: VRAM, Temp, Power, Clocks)
+- [x] set_power_limit Tool (nvidia-smi -pl, mit Grenzwert-Check)
+- [x] CPU-Temperatur in sys_info (/sys/class/thermal)
+- [x] Config-Dialog (Tabs: Modell/Sampler/Agent/Logging, Ctrl+,)
+- [x] LlamaWorker liest Sampler-Parameter aus AppConfig
+- [x] rebuildSamplers() — Sampler live neu bauen ohne Neustart
+- [x] Git init automatisch pro Projektverzeichnis (kein Henne-Ei-Problem)
+- [x] Git-Tools pfadbasiert (jedes Projekt eigenes Repo)
 
 ### Offen
 - [ ] Planner/Executor-Trennung
@@ -255,7 +266,34 @@ Pattern: Generation Stamp.
   oder plain Markdown)
 - Allgemeines Logging (qDebug → Datei, Log-Level konfigurierbar)
 
-#### Editor-Tabs
+#### NVIDIA / Hardware-Monitoring
+- `sys_info` im sysinfo-MCP um GPU-Daten erweitern:
+  - `nvidia-smi` via QProcess (immer verfügbar wenn Treiber installiert)
+  - NVML (libnvidia-ml) direkt einbinden für:
+    - GPU-Name, VRAM total/used/free
+    - GPU-Auslastung (%), GPU-Temperatur
+    - Power Draw (Watt) und Power Limit
+    - Power Limit setzen via nvmlDeviceSetPowerManagementLimit()
+      → nützlich für Thermal Management beim langen Inferenz-Betrieb
+  - Fallback: wenn NVML nicht vorhanden → nvidia-smi parsen
+  - Neues Tool: `gpu_info` — gibt alle GPU-Metriken zurück
+  - Neues Tool: `set_power_limit` — setzt GPU Power Limit (Watt)
+    Sicherheit: Minimum/Maximum aus NVML respektieren
+- CPU-Metriken erweitern: /proc/stat für CPU-Auslastung (%), Temperatur via
+  /sys/class/thermal/thermal_zone*/temp
+
+#### Ollama Modell-Integration
+- Ollama speichert Modelle in `~/.ollama/models/`:
+  - `manifests/` — JSON mit Modell-Metadaten (Name, Parameter, Quantisierung)
+  - `blobs/`     — eigentliche Gewichte (SHA256-benannt)
+- Idee: beim Modell-Auswahl-Dialog den Ollama-Manifest-Ordner scannen
+  und verfügbare Modelle anzeigen (Name, Größe, Quantisierung)
+- OllamaScanner-Klasse (oder Teil von AppConfig):
+  - `scanOllamaModels()` → Liste von {name, path, size, quantization}
+  - Blob-Pfad aus Manifest auflösen → echter .gguf-Pfad für llama.cpp
+  - Achtung: Ollama-Blobs sind nicht immer GGUF — Format prüfen
+- Im Config-Dialog: "Aus Ollama importieren" Button
+
 - Separates Fenster (`QMainWindow` oder `QDockWidget`) mit `QTabWidget`
 - Jeder Tab = eine Datei aus der Sandbox (geladen via read_file MCP)
 - Einfacher Text-Editor (QPlainTextEdit, Monospace, Zeilennummern)

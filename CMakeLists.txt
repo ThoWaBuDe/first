@@ -20,21 +20,27 @@ set(SOURCES
     src/main.cpp
     src/MainWindow.cpp
     src/Agent.cpp
-    src/CommandProcessor.cpp   # NEU: Slash-Kommandos
+    src/CommandProcessor.cpp
     src/LlamaWorker.cpp
     src/McpClient.cpp
     src/McpManager.cpp
     src/ChatModel.cpp
+    src/AppConfig.cpp
+    src/ChatLogger.cpp
+    src/ConfigDialog.cpp
 )
 
 set(HEADERS
     src/MainWindow.h
     src/Agent.h
-    src/CommandProcessor.h     # NEU
+    src/CommandProcessor.h
     src/LlamaWorker.h
     src/McpClient.h
     src/McpManager.h
     src/ChatModel.h
+    src/AppConfig.h
+    src/ChatLogger.h
+    src/ConfigDialog.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}
