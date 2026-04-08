@@ -19,6 +19,10 @@ Agent::Agent(const QString &modelPath, QObject *parent)
 
     qRegisterMetaType<LlamaWorker::SamplerProfile>();
     qRegisterMetaType<ChatTemplate::Preset>();
+    // QVector<ChatMessage> muss als Metatyp registriert sein damit
+    // invokeMethod() es über die Thread-Grenze kopieren kann.
+    // Qt kopiert den QVector vollständig — thread-sicher.
+    qRegisterMetaType<QVector<ChatMessage>>("QVector<ChatMessage>");
 
     connect(m_worker, &LlamaWorker::tokenGenerated,  this, &Agent::onTokenReceived);
     connect(m_worker, &LlamaWorker::generationDone,  this, &Agent::onGenerationDone);
@@ -27,10 +31,6 @@ Agent::Agent(const QString &modelPath, QObject *parent)
     connect(m_worker, &LlamaWorker::statsUpdate,     this, &Agent::onStatsUpdate);
     connect(&m_workerThread, &QThread::finished,     m_worker, &QObject::deleteLater);
 
-    // ─── Neu: Chat-Template Signal ────────────────────────────────────────
-    // chatTemplateDetected kommt VOR modelLoaded() —
-    // so ist ChatModel korrekt konfiguriert wenn onModelLoaded() den
-    // System-Prompt aufbaut.
     connect(m_worker, &LlamaWorker::chatTemplateDetected,
             this,     &Agent::onChatTemplateDetected);
 
@@ -70,9 +70,6 @@ void Agent::start()
             for (const QString &e : errors)
                 emit appendTools("MCP Fehler: " + e, "error");
 
-        // System-Prompt wird in onModelLoaded() gesetzt, NACH dem
-        // Template-Signal. Hier noch nichts in ChatModel schreiben.
-
         QMetaObject::invokeMethod(m_worker, "initialize",
                                   Qt::QueuedConnection,
                                   Q_ARG(QString, m_modelPath));
@@ -80,117 +77,59 @@ void Agent::start()
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// NEUE METHODEN: System-Prompt + Chat-Template
+// SYSTEM-PROMPT + CHAT-TEMPLATE
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── buildFullSystemPrompt ───────────────────────────────────────────────────
-// Kombiniert User-Text und MCP-Tool-Beschreibungen.
-//
-// Aufbau:
-//   [User-Text aus AppConfig]       ← optional, kann leer sein
-//   [MCP Tool-Beschreibungen]       ← immer vorhanden
-//
-// User-Text steht vorne weil LLMs dem Anfang des Prompts mehr Gewicht geben
-// (Attention-Mechanismus). Persönlichkeit/Verhalten-Anweisungen sollten
-// daher vor den technischen Tool-Beschreibungen stehen.
-//
-// Analogie AVR: wie ein UART-Frame der aus Pflicht-Header (Tool-Prompt) und
-// optionalem Payload-Prefix (User-Text) besteht — Präambel zuerst.
 QString Agent::buildFullSystemPrompt() const
 {
     QString userPart = AppConfig::instance().userSystemPrompt().trimmed();
     QString mcpPart  = m_mcp.buildToolsSystemPrompt();
-
-    if (userPart.isEmpty())
-        return mcpPart;
-
+    if (userPart.isEmpty()) return mcpPart;
     return userPart + "\n\n" + mcpPart;
 }
 
-// ─── applyChatTemplate ───────────────────────────────────────────────────────
-// Liest das gewünschte Preset aus AppConfig und injiziert das resultierende
-// ChatTemplate in ChatModel.
-//
-// Pattern: Dependency Injection — ChatModel bekommt das Template von Agent,
-// entscheidet selbst nichts über das Format.
-//
-// Preset::Auto → m_detectedPreset (aus GGUF erkannt)
-// Preset::Custom → TODO: JSON parsen, aktuell Fallback ChatML
-// Alle anderen → direkt aus ChatTemplate::forPreset()
+// applyChatTemplate() wird weiterhin aufgerufen um ChatModel das richtige
+// Template zu geben — der Fallback im Worker braucht es.
 void Agent::applyChatTemplate()
 {
     ChatTemplate::Preset preset = AppConfig::instance().chatTemplatePreset();
-
     ChatTemplate tmpl;
     if (preset == ChatTemplate::Preset::Auto) {
-        // Auto: zuletzt erkanntes Preset aus dem GGUF verwenden.
-        // m_detectedPreset wird in onChatTemplateDetected() gesetzt —
-        // das Signal kommt VOR diesem Aufruf, also ist m_detectedPreset aktuell.
         tmpl = ChatTemplate::forPreset(m_detectedPreset);
     } else if (preset == ChatTemplate::Preset::Custom) {
-        // TODO Custom-Template-Parsing:
-        // AppConfig::customChatTemplate() enthält einen JSON-String mit Feldern:
-        // {"systemStart":"...", "systemEnd":"...", "userStart":"...", ...}
-        // Dieser muss in ein ChatTemplate-Struct umgewandelt werden.
-        // Vorerst Fallback auf ChatML — User wird im toolView informiert.
         emit appendTools(
             "Custom Chat-Template: Parsing noch nicht implementiert — Fallback ChatML.", "system");
         tmpl = ChatTemplate::chatML();
     } else {
         tmpl = ChatTemplate::forPreset(preset);
     }
-
     m_chatModel.setChatTemplate(tmpl);
 }
 
-// ─── onChatTemplateDetected ──────────────────────────────────────────────────
-// Slot — empfängt das erkannte Template vom LlamaWorker.
-// Kommt VOR onModelLoaded() → ChatModel ist konfiguriert wenn der
-// System-Prompt aufgebaut wird.
-//
-// Was hier passiert (in dieser Reihenfolge):
-//   1. Jinja2-String für Info/Debug in AppConfig speichern
-//   2. m_detectedPreset setzen (für applyChatTemplate() bei Auto)
-//   3. Template in ChatModel injizieren
-//   4. Info im toolView anzeigen
 void Agent::onChatTemplateDetected(const QString &jinjaTemplate,
                                     ChatTemplate::Preset detectedPreset)
 {
-    // Jinja2-String in AppConfig speichern (kein save() — nur RAM)
     AppConfig::instance().setDetectedJinjaTemplate(jinjaTemplate);
-
-    // Erkanntes Preset merken
     m_detectedPreset = detectedPreset;
-
-    // Template sofort anwenden — ChatModel ist bereit
     applyChatTemplate();
 
-    // Info-Ausgabe im toolView
     QString presetName = ChatTemplate::presetName(detectedPreset);
     ChatTemplate::Preset userChoice = AppConfig::instance().chatTemplatePreset();
 
     if (jinjaTemplate.isEmpty()) {
         emit appendTools(
-            QString("Chat-Template: kein Template im GGUF eingebettet → <b>%1</b> (Fallback)")
+            QString("Chat-Template: kein Template im GGUF → <b>%1</b> (Fallback)")
             .arg(presetName.toHtmlEscaped()), "system");
     } else {
         if (userChoice == ChatTemplate::Preset::Auto) {
             emit appendTools(
-                QString("Chat-Template erkannt (Auto): <b>%1</b>")
+                QString("Chat-Template (Auto): <b>%1</b> — llama_chat_apply_template aktiv")
                 .arg(presetName.toHtmlEscaped()), "system");
         } else {
-            // User hat manuell ein Preset gewählt — Abweichung anzeigen wenn nötig
             QString chosenName = ChatTemplate::presetName(userChoice);
-            if (userChoice != detectedPreset) {
-                emit appendTools(
-                    QString("Chat-Template: GGUF enthält <i>%1</i>, "
-                            "User-Einstellung: <b>%2</b>")
-                    .arg(presetName.toHtmlEscaped(), chosenName.toHtmlEscaped()), "system");
-            } else {
-                emit appendTools(
-                    QString("Chat-Template: <b>%1</b>")
-                    .arg(chosenName.toHtmlEscaped()), "system");
-            }
+            emit appendTools(
+                QString("Chat-Template: GGUF=<i>%1</i>, Einstellung=<b>%2</b>")
+                .arg(presetName.toHtmlEscaped(), chosenName.toHtmlEscaped()), "system");
         }
     }
 }
@@ -217,8 +156,7 @@ void Agent::onUserMessage(const QString &text)
                 return;
             }
 
-            if (result.prompt.isEmpty())
-                return;
+            if (result.prompt.isEmpty()) return;
 
             emit appendChat(QString("<b>Du:</b> %1").arg(text.toHtmlEscaped()), "user");
             emit appendChat("<b>Assistent:</b> ", "assistant");
@@ -274,10 +212,6 @@ void Agent::onClearChat()
     if (m_worker) m_worker->stopGeneration();
 
     m_chatModel.clear();
-
-    // ─── Neu: System-Prompt nach Clear neu aufbauen ───────────────────────
-    // Damit Änderungen am User-System-Prompt im ConfigDialog ohne Neustart
-    // wirksam werden — /clear reicht.
     m_chatModel.setSystemPrompt(buildFullSystemPrompt());
 
     m_currentResponse.clear();
@@ -300,9 +234,6 @@ void Agent::onClearChat()
 
 void Agent::onModelLoaded()
 {
-    // ─── Neu: vollständigen System-Prompt aufbauen ────────────────────────
-    // ChatModel hat bereits das richtige Template (gesetzt in onChatTemplateDetected).
-    // Jetzt den kombinierten System-Prompt (User + MCP) einfügen.
     m_chatModel.setSystemPrompt(buildFullSystemPrompt());
 
     emit inputEnabled(true);
@@ -369,7 +300,8 @@ void Agent::onGenerationDone(const QString &fullResponse)
         m_chatModel.addUserMessage(
             QString("[Zusammenfassung der bisherigen Konversation:\n%1]")
             .arg(fullResponse));
-        m_chatModel.addAssistantMessage("Verstanden. Ich habe die bisherige Konversation im Überblick.");
+        m_chatModel.addAssistantMessage(
+            "Verstanden. Ich habe die bisherige Konversation im Überblick.");
         emit appendTools(
             QString("<b>Zusammenfassung erstellt:</b><br>"
                     "<pre style='font-size:10px'>%1</pre>")
@@ -417,14 +349,24 @@ void Agent::onGenerationDone(const QString &fullResponse)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PRIVATE METHODEN (unverändert aus Original)
+// PRIVATE METHODEN
 // ═════════════════════════════════════════════════════════════════════════════
 
+// ─── startGeneration ─────────────────────────────────────────────────────────
+// Kernänderung: übergibt m_chatModel.messages() statt buildPrompt().
+//
+// Qt kopiert den QVector<ChatMessage> vollständig beim invokeMethod() —
+// da QueuedConnection eine tiefe Kopie macht. Damit ist der Worker-Thread
+// nie von Änderungen im GUI-Thread betroffen während er generiert.
+//
+// Analogie AVR: wie du einen Puffer in den DMA-Bereich kopierst bevor
+// du den DMA startest — der ursprüngliche Puffer kann danach verändert
+// werden ohne die laufende Übertragung zu stören.
 void Agent::startGeneration(LlamaWorker::SamplerProfile profile)
 {
     QMetaObject::invokeMethod(m_worker, "generate",
                               Qt::QueuedConnection,
-                              Q_ARG(QString,                     m_chatModel.buildPrompt()),
+                              Q_ARG(QVector<ChatMessage>,        m_chatModel.messages()),
                               Q_ARG(LlamaWorker::SamplerProfile, profile));
 }
 
@@ -734,15 +676,19 @@ QString Agent::computeDiffHtml(const QString &before, const QString &after,
     auto at = [&](int i, int j) -> int& { return dp[i*(n+1)+j]; };
     for (int i = 1; i <= m; ++i)
         for (int j = 1; j <= n; ++j)
-            at(i,j) = (oldLines[i-1]==newLines[j-1]) ? at(i-1,j-1)+1 : std::max(at(i-1,j),at(i,j-1));
+            at(i,j) = (oldLines[i-1]==newLines[j-1]) ? at(i-1,j-1)+1
+                                                      : std::max(at(i-1,j),at(i,j-1));
 
     struct DiffLine { enum Type{Equal,Added,Removed}type; QString text; };
     QVector<DiffLine> diffLines;
     int i=m, j=n;
     while (i>0||j>0) {
-        if (i>0&&j>0&&oldLines[i-1]==newLines[j-1]) { diffLines.prepend({DiffLine::Equal,oldLines[i-1]}); --i;--j; }
-        else if (j>0&&(i==0||at(i,j-1)>=at(i-1,j))) { diffLines.prepend({DiffLine::Added,newLines[j-1]}); --j; }
-        else { diffLines.prepend({DiffLine::Removed,oldLines[i-1]}); --i; }
+        if (i>0&&j>0&&oldLines[i-1]==newLines[j-1])
+            { diffLines.prepend({DiffLine::Equal,oldLines[i-1]}); --i;--j; }
+        else if (j>0&&(i==0||at(i,j-1)>=at(i-1,j)))
+            { diffLines.prepend({DiffLine::Added,newLines[j-1]}); --j; }
+        else
+            { diffLines.prepend({DiffLine::Removed,oldLines[i-1]}); --i; }
     }
 
     static constexpr int CONTEXT=2;
@@ -750,19 +696,27 @@ QString Agent::computeDiffHtml(const QString &before, const QString &after,
     for (int k=0;k<diffLines.size();++k) if (diffLines[k].type!=DiffLine::Equal) changed[k]=true;
     for (int k=0;k<diffLines.size();++k) {
         if (!changed[k]) continue;
-        for (int c=std::max(0,k-CONTEXT);c<=std::min((int)diffLines.size()-1,k+CONTEXT);++c) show[c]=true;
+        for (int c=std::max(0,k-CONTEXT);c<=std::min((int)diffLines.size()-1,k+CONTEXT);++c)
+            show[c]=true;
     }
 
-    QString html = QString("<b>Diff: %1</b><br><pre style='font-size:10px'>").arg(filename.toHtmlEscaped());
+    QString html = QString("<b>Diff: %1</b><br><pre style='font-size:10px'>")
+                   .arg(filename.toHtmlEscaped());
     bool inGap=false;
     for (int k=0;k<diffLines.size();++k) {
-        if (!show[k]) { if (!inGap){html+="<span style='color:#aaa'>...</span>\n";inGap=true;} continue; }
+        if (!show[k]) {
+            if (!inGap){html+="<span style='color:#aaa'>...</span>\n";inGap=true;}
+            continue;
+        }
         inGap=false;
         QString esc=diffLines[k].text.toHtmlEscaped();
         switch (diffLines[k].type) {
-            case DiffLine::Added:   html+=QString("<span style='color:#188038;background:#e6f4ea'>+ %1</span>\n").arg(esc); break;
-            case DiffLine::Removed: html+=QString("<span style='color:#c5221f;background:#fce8e6'>- %1</span>\n").arg(esc); break;
-            case DiffLine::Equal:   html+=QString("<span style='color:#666'>  %1</span>\n").arg(esc); break;
+            case DiffLine::Added:
+                html+=QString("<span style='color:#188038;background:#e6f4ea'>+ %1</span>\n").arg(esc); break;
+            case DiffLine::Removed:
+                html+=QString("<span style='color:#c5221f;background:#fce8e6'>- %1</span>\n").arg(esc); break;
+            case DiffLine::Equal:
+                html+=QString("<span style='color:#666'>  %1</span>\n").arg(esc); break;
         }
     }
     html += "</pre>";

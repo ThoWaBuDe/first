@@ -1,15 +1,33 @@
 #pragma once
 #include <QObject>
 #include <QString>
+#include <QVector>
 #include <atomic>
-#include "ChatTemplate.h"
+#include "ChatModel.h"    // für QVector<ChatMessage>
+#include "ChatTemplate.h" // für Fallback
 
 // ─── LlamaWorker ──────────────────────────────────────────────────────────────
 // llama.cpp Inference im Worker-Thread. Pattern: Active Object.
 //
-// Neu: Nach dem Laden des Modells wird das eingebettete Chat-Template
-// aus den GGUF-Metadaten ausgelesen und per Signal gemeldet.
-// Agent verbindet dieses Signal und aktualisiert AppConfig + ChatModel.
+// Umbau: generate() bekommt jetzt QVector<ChatMessage> statt einen fertigen
+// Prompt-String. Der Worker baut den Prompt intern via
+// llama_chat_apply_template() — die Funktion liest das Chat-Template direkt
+// aus den GGUF-Metadaten des geladenen Modells.
+//
+// Warum im Worker und nicht im Agent?
+//   llama_chat_apply_template() braucht den llama_model* Pointer.
+//   Der lebt im Worker-Thread. Würde Agent ihn benutzen, wäre das ein
+//   Datenrace ohne Queue-Schutz.
+//   Pattern: den Zugriff auf ressource-gebundene Daten dort lassen wo
+//   die Ressource lebt — analog zum AVR wo du Peripherie-Register nur
+//   aus dem richtigen ISR-Kontext anfasst.
+//
+// Fallback:
+//   Falls llama_chat_apply_template() -1 zurückgibt (kein Template im GGUF,
+//   unbekanntes Format), fällt applyTemplate() auf ChatModel::buildPrompt()
+//   zurück — das bisherige Verhalten mit ChatTemplate-Struct.
+//   ChatTemplate.h bleibt deshalb erhalten.
+
 class LlamaWorker : public QObject {
     Q_OBJECT
 
@@ -22,8 +40,12 @@ public:
 
 public slots:
     void initialize(const QString &modelPath);
-    void generate(const QString &prompt,
+
+    // Neu: bekommt rohe Nachrichten, baut Prompt intern via llama_chat_apply_template.
+    // profile steuert welcher Sampler verwendet wird (Chat=kreativ, Tool=deterministisch).
+    void generate(const QVector<ChatMessage> &messages,
                   LlamaWorker::SamplerProfile profile = LlamaWorker::SamplerProfile::Chat);
+
     void stopGeneration();
     void rebuildSamplers();
 
@@ -35,25 +57,31 @@ signals:
     void modelLoaded();
     void samplersRebuilt();
 
-    // ─── Neu: Chat-Template aus GGUF ──────────────────────────────────────
     // Wird direkt vor modelLoaded() emittiert.
-    // jinjaTemplate: roher Jinja2-String aus GGUF-Feld "tokenizer.chat_template".
+    // jinjaTemplate: roher Jinja2-String aus GGUF ("tokenizer.chat_template").
     //   Leer wenn kein Template eingebettet ist.
     // detectedPreset: Heuristisch erkanntes Preset (nie Preset::Auto).
-    //   ChatML als Fallback wenn kein Template oder unbekanntes Format.
-    //
-    // Reihenfolge der Signale:
-    //   1. chatTemplateDetected(...)  ← Agent stellt Template ein
-    //   2. modelLoaded()             ← Agent zeigt "Modell bereit" an
-    //
-    // Warum vor modelLoaded()?
-    //   Agent::onModelLoaded() baut den System-Prompt und gibt ihn an
-    //   ChatModel weiter. ChatModel muss vorher das richtige Template
-    //   kennen damit buildPrompt() korrekt formatiert.
+    //   Wird für ConfigDialog-Anzeige und Fallback verwendet.
     void chatTemplateDetected(const QString &jinjaTemplate,
                               ChatTemplate::Preset detectedPreset);
 
 private:
+    // Baut den fertigen Prompt-String aus den Nachrichten.
+    //
+    // Strategie (zwei Stufen):
+    //   1. llama_chat_apply_template() — nutzt Template aus GGUF
+    //      Puffer-Größe: 2 × Summe aller Nachrichtenlängen (llama.cpp Empfehlung)
+    //      Gibt -1 zurück wenn kein Template vorhanden oder unbekannt → Fallback
+    //   2. Fallback: ChatModel::buildPromptFromMessages() mit m_detectedPreset
+    //      Bisheriges Verhalten, garantiert immer einen String zu liefern.
+    //
+    // add_ass=true: öffnet den Assistant-Turn am Ende — llama.cpp generiert
+    // ab dort. Entspricht dem bisherigen assistantStart am Ende von buildPrompt().
+    QString applyTemplate(const QVector<ChatMessage> &messages) const;
+
+    // Hilfsfunktion: ChatMessage::Role → C-String für llama_chat_message
+    static const char *roleToStr(ChatMessage::Role role);
+
     void *m_model       = nullptr;
     void *m_ctx         = nullptr;
     void *m_samplerChat = nullptr;
@@ -62,6 +90,10 @@ private:
 
     std::atomic<bool> m_stopFlag{false};
     bool m_initialized = false;
+
+    // Zuletzt erkanntes Preset — für Fallback in applyTemplate().
+    // Wird in initialize() nach llama_model_chat_template() gesetzt.
+    ChatTemplate::Preset m_detectedPreset = ChatTemplate::Preset::ChatML;
 
     QString tokenToString(int tokenId) const;
     void    cleanup();

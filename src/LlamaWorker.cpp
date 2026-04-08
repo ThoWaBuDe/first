@@ -1,4 +1,5 @@
 #include "LlamaWorker.h"
+#include "ChatModel.h"
 #include "AppConfig.h"
 
 #include "llama.h"
@@ -6,6 +7,8 @@
 
 #include <QDebug>
 #include <vector>
+#include <string>
+#include <numeric>  // für std::accumulate
 
 #define AS_MODEL(p)   reinterpret_cast<llama_model*>(p)
 #define AS_CTX(p)     reinterpret_cast<llama_context*>(p)
@@ -68,7 +71,7 @@ void LlamaWorker::rebuildSamplers()
 // ─── initialize ──────────────────────────────────────────────────────────────
 void LlamaWorker::initialize(const QString &modelPath)
 {
-    qDebug() << "ModellPfad: " << modelPath;
+    qDebug() << "ModellPfad:" << modelPath;
     cleanup();
     llama_backend_init();
 
@@ -101,35 +104,106 @@ void LlamaWorker::initialize(const QString &modelPath)
     m_initialized = true;
 
     // ─── Chat-Template aus GGUF auslesen ─────────────────────────────────
-    // llama_model_chat_template() liest das Feld "tokenizer.chat_template"
-    // aus den GGUF-Metadaten. Gibt nullptr zurück wenn kein Template
-    // eingebettet ist (ältere Modelle, manche Fine-Tunes).
-    //
-    // Der Pointer zeigt in den internen Modell-Speicher — kein free() nötig.
-    // Lebensdauer = Lebensdauer des llama_model*.
-    //
-    // Analogie AVR: wie das Lesen eines Flash-Bereichs der beim Flashen
-    // vom Hersteller befüllt wurde — read-only, immer verfügbar solange
-    // das Modell im Speicher ist.
-    //
-    // TODO: llama.cpp bietet auch llama_chat_apply_template() an, die den
-    // Jinja2-String direkt rendern kann. Das würde die Heuristik in
-    // ChatTemplate::detectFromJinja() überflüssig machen und wäre robuster
-    // für unbekannte Modelle. Kandidat für Stufe 2 wenn Custom-Templates
-    // implementiert werden.
     const char *rawTmpl = llama_model_chat_template(AS_MODEL(m_model), nullptr);
     QString jinjaTemplate = rawTmpl ? QString::fromUtf8(rawTmpl) : QString();
-    ChatTemplate::Preset detected = ChatTemplate::detectFromJinja(jinjaTemplate);
 
-    // chatTemplateDetected VOR modelLoaded() senden —
-    // Agent::onChatTemplateDetected() muss ChatModel konfigurieren bevor
-    // onModelLoaded() den System-Prompt setzt und buildPrompt() nutzt.
-    emit chatTemplateDetected(jinjaTemplate, detected);
+    m_detectedPreset = ChatTemplate::detectFromJinja(jinjaTemplate);
+
+    emit chatTemplateDetected(jinjaTemplate, m_detectedPreset);
     emit modelLoaded();
 }
 
+// ─── roleToStr ───────────────────────────────────────────────────────────────
+const char *LlamaWorker::roleToStr(ChatMessage::Role role)
+{
+    switch (role) {
+    case ChatMessage::Role::System:    return "system";
+    case ChatMessage::Role::User:      return "user";
+    case ChatMessage::Role::Assistant: return "assistant";
+    case ChatMessage::Role::Tool:      return "tool";
+    }
+    return "user";
+}
+
+// ─── applyTemplate ───────────────────────────────────────────────────────────
+QString LlamaWorker::applyTemplate(const QVector<ChatMessage> &messages) const
+{
+    if (!m_model) return {};
+
+    // ── Stufe 1: llama_chat_apply_template ───────────────────────────────
+
+    std::vector<std::string>         contents;
+    std::vector<llama_chat_message>  msgs;
+    contents.reserve(messages.size());
+    msgs.reserve(messages.size());
+
+    for (const ChatMessage &m : messages) {
+        contents.push_back(m.content.toStdString());
+        msgs.push_back({ roleToStr(m.role), contents.back().c_str() });
+    }
+
+    // Template aus dem Modell extrahieren
+    const char * tmpl = llama_model_chat_template(AS_MODEL(m_model), nullptr);
+
+    size_t totalContent = std::accumulate(
+        contents.begin(), contents.end(), size_t(0),
+        [](size_t sum, const std::string &s) { return sum + s.size(); });
+    size_t bufSize = totalContent * 2 + 1024;
+
+    std::vector<char> buf(bufSize);
+
+    // KORREKTUR: Erster Parameter ist das Template (const char*), nicht das Model
+    int result = llama_chat_apply_template(
+        tmpl,
+        msgs.data(),
+        msgs.size(),
+        true,         // add_ass: öffne Assistant-Turn am Ende
+        buf.data(),
+        static_cast<int32_t>(buf.size())
+        );
+
+    if (result > 0) {
+        return QString::fromUtf8(buf.data(), result);
+    }
+
+    // Fallback bei zu kleinem Puffer
+    if (result < 0 && bufSize < 512 * 1024) {
+        bufSize = 512 * 1024;
+        buf.resize(bufSize);
+        result = llama_chat_apply_template(
+            tmpl,
+            msgs.data(), msgs.size(),
+            true, buf.data(), static_cast<int32_t>(buf.size())
+            );
+        if (result > 0)
+            return QString::fromUtf8(buf.data(), result);
+    }
+
+    // ── Stufe 2: Fallback auf ChatTemplate ───────────────────────────────
+    qWarning() << "LlamaWorker: llama_chat_apply_template fehlgeschlagen,"
+               << "Fallback auf ChatTemplate-Preset:"
+               << ChatTemplate::presetName(m_detectedPreset);
+
+    ChatModel fallbackModel;
+    fallbackModel.setChatTemplate(ChatTemplate::forPreset(m_detectedPreset));
+    for (const ChatMessage &m : messages) {
+        switch (m.role) {
+        case ChatMessage::Role::System:
+            fallbackModel.setSystemPrompt(m.content); break;
+        case ChatMessage::Role::User:
+            fallbackModel.addUserMessage(m.content); break;
+        case ChatMessage::Role::Assistant:
+            fallbackModel.addAssistantMessage(m.content); break;
+        case ChatMessage::Role::Tool:
+            fallbackModel.addToolResult("tool", m.content); break;
+        }
+    }
+    return fallbackModel.buildPrompt();
+}
+
 // ─── generate ────────────────────────────────────────────────────────────────
-void LlamaWorker::generate(const QString &prompt, LlamaWorker::SamplerProfile profile)
+void LlamaWorker::generate(const QVector<ChatMessage> &messages,
+                           LlamaWorker::SamplerProfile profile)
 {
     if (!m_initialized) {
         emit errorOccurred("Worker nicht initialisiert.");
@@ -139,29 +213,35 @@ void LlamaWorker::generate(const QString &prompt, LlamaWorker::SamplerProfile pr
     m_stopFlag.store(false);
 
     switch (profile) {
-        case SamplerProfile::Tool: m_sampler = m_samplerTool; break;
-        default:                   m_sampler = m_samplerChat; break;
+    case SamplerProfile::Tool: m_sampler = m_samplerTool; break;
+    default:                   m_sampler = m_samplerChat; break;
     }
 
     llama_sampler_reset(AS_SAMPLER(m_sampler));
 
-    const std::string promptStr = prompt.toStdString();
+    QString promptQStr = applyTemplate(messages);
+    if (promptQStr.isEmpty()) {
+        emit errorOccurred("Prompt konnte nicht gebaut werden.");
+        return;
+    }
+
+    const std::string promptStr = promptQStr.toStdString();
     const llama_vocab *vocab    = llama_model_get_vocab(AS_MODEL(m_model));
 
     int maxTokens = static_cast<int>(promptStr.size()) + 128;
     std::vector<llama_token> promptTokens(maxTokens);
 
     int nTokens = llama_tokenize(vocab, promptStr.c_str(),
-        static_cast<int32_t>(promptStr.size()),
-        promptTokens.data(), static_cast<int32_t>(promptTokens.size()),
-        true, true);
+                                 static_cast<int32_t>(promptStr.size()),
+                                 promptTokens.data(), static_cast<int32_t>(promptTokens.size()),
+                                 true, true);
 
     if (nTokens < 0) {
         promptTokens.resize(-nTokens);
         llama_tokenize(vocab, promptStr.c_str(),
-            static_cast<int32_t>(promptStr.size()),
-            promptTokens.data(), static_cast<int32_t>(promptTokens.size()),
-            true, true);
+                       static_cast<int32_t>(promptStr.size()),
+                       promptTokens.data(), static_cast<int32_t>(promptTokens.size()),
+                       true, true);
         nTokens = static_cast<int>(promptTokens.size());
     }
     promptTokens.resize(nTokens);
@@ -172,7 +252,7 @@ void LlamaWorker::generate(const QString &prompt, LlamaWorker::SamplerProfile pr
     if (nTokens >= n_ctx) {
         emit errorOccurred(
             QString("Context-Overflow: Prompt hat %1 Tokens, Context-Window ist %2.")
-            .arg(nTokens).arg(n_ctx));
+                .arg(nTokens).arg(n_ctx));
         return;
     }
 
@@ -180,7 +260,7 @@ void LlamaWorker::generate(const QString &prompt, LlamaWorker::SamplerProfile pr
 
     if ((n_ctx - nTokens) < n_ctx / 10)
         emit tokenGenerated(QString("[WARNUNG: Kontext fast voll: %1 Tokens]\n")
-                            .arg(n_ctx - nTokens));
+                                .arg(n_ctx - nTokens));
 
     llama_memory_t mem = llama_get_memory(AS_CTX(m_ctx));
     llama_memory_clear(mem, false);
@@ -191,7 +271,7 @@ void LlamaWorker::generate(const QString &prompt, LlamaWorker::SamplerProfile pr
         llama_batch chunk = llama_batch_get_one(promptTokens.data() + processed, chunkSize);
         if (llama_decode(AS_CTX(m_ctx), chunk) != 0) {
             emit errorOccurred(QString("llama_decode fehlgeschlagen bei Token %1/%2.")
-                               .arg(processed).arg(nTokens));
+                                   .arg(processed).arg(nTokens));
             return;
         }
         processed += chunkSize;

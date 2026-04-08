@@ -15,17 +15,22 @@
 // ─── Agent ────────────────────────────────────────────────────────────────────
 // Pattern: Presenter aus MVP.
 //
-// Neu: Chat-Template und User-System-Prompt Integration.
+// Umbau: startGeneration() übergibt nicht mehr einen fertigen Prompt-String
+// an den Worker, sondern QVector<ChatMessage> — der Worker baut den Prompt
+// intern via llama_chat_apply_template().
 //
-//   buildFullSystemPrompt()  — kombiniert User-Text + MCP-Tools
-//   applyChatTemplate()      — injiziert das richtige Template in ChatModel
-//   onChatTemplateDetected() — Slot für LlamaWorker::chatTemplateDetected()
+// Was sich geändert hat:
+//   - startGeneration() ruft invokeMethod mit Q_ARG(QVector<ChatMessage>)
+//   - ChatModel::buildPrompt() wird nicht mehr aufgerufen
+//   - applyChatTemplate() / buildFullSystemPrompt() bleiben für ConfigDialog
+//     und für den Fallback im Worker
 //
-// Reihenfolge beim Start:
-//   1. MCP-Server starten (async)
-//   2. LlamaWorker::initialize()
-//   3. chatTemplateDetected() → applyChatTemplate()
-//   4. modelLoaded() → buildFullSystemPrompt() → ChatModel::setSystemPrompt()
+// Was unverändert bleibt:
+//   - Sampler-Umschaltung (Chat/Tool)
+//   - Tool-Loop, Deadlock-Erkennung, JSON-Repair
+//   - Stop-Mechanismus (Session-ID)
+//   - Kontext-Management (Summarize)
+//   - Chat-Template Detection + ConfigDialog-Anzeige
 
 class Agent : public QObject {
     Q_OBJECT
@@ -57,45 +62,28 @@ private slots:
     void onModelLoaded();
     void onStatsUpdate(int promptTokens, int ctxSize);
     void onError(const QString &error);
-
-    // ─── Neu: Chat-Template vom Worker ───────────────────────────────────
-    // Empfängt das erkannte Template direkt vor modelLoaded().
-    // Setzt m_detectedPreset und ruft applyChatTemplate() auf.
     void onChatTemplateDetected(const QString &jinjaTemplate,
                                 ChatTemplate::Preset detectedPreset);
 
 private:
+    // Übergibt m_chatModel.messages() an den Worker via invokeMethod.
+    // profile bestimmt ob Chat- oder Tool-Sampler aktiv ist.
     void startGeneration(LlamaWorker::SamplerProfile profile);
+
     void handleToolCall(const QString &fullResponse, uint32_t sessionId);
     void filterToken(const QString &token);
     void emitStats();
-
     void checkContextUsage();
     void summarizeContext();
 
     QString computeDiffHtml(const QString &before, const QString &after,
                             const QString &filename) const;
-
     QString toolCallKey(const QString &toolName, const QJsonObject &args) const;
     QString deadlockEscalationPrompt(const QString &toolName, int count) const;
     QString repairJson(const QString &broken) const;
 
-    // ─── Neu: System-Prompt + Template ───────────────────────────────────
-
-    // Baut den vollständigen System-Prompt:
-    //   1. User-Text aus AppConfig::userSystemPrompt()  (leer = weggelassen)
-    //   2. MCP Tool-Beschreibungen aus McpManager
-    // Reihenfolge: User-Text zuerst — Modelle gewichten Prompt-Anfang stärker.
     QString buildFullSystemPrompt() const;
-
-    // Liest das gewünschte Template aus AppConfig und injiziert es in ChatModel.
-    // Bei Preset::Auto wird m_detectedPreset verwendet.
-    // Bei Preset::Custom: Fallback ChatML bis Custom-Parsing implementiert ist.
-    //
-    // TODO Custom-Template: AppConfig::customChatTemplate() enthält einen
-    // JSON-String mit den Format-Feldern. Dieser muss geparst und in ein
-    // ChatTemplate-Struct umgewandelt werden. Aktuell Fallback auf ChatML.
-    void applyChatTemplate();
+    void    applyChatTemplate();
 
     // ─── Owned Objects ────────────────────────────────────────────────────
     QString           m_modelPath;
@@ -106,39 +94,28 @@ private:
     QThread           m_workerThread;
     LlamaWorker      *m_worker = nullptr;
 
-    // ─── Session-ID (Stop-Mechanismus) ───────────────────────────────────
     uint32_t m_sessionId = 0;
 
-    // ─── Generierungs-State ───────────────────────────────────────────────
     bool    m_generating        = false;
     QString m_currentResponse;
     QString m_thinkBuffer;
     bool    m_inThinkBlock      = false;
     int     m_continuationCount = 0;
     static constexpr int MAX_CONTINUATIONS = 3;
-
     static constexpr int MAX_TOOL_RESULT_CHARS = 6000;
 
-    // ─── Deadlock-Tracking ────────────────────────────────────────────────
     QHash<QString, int> m_toolFailCount;
-
     static constexpr int DEADLOCK_WARN     = 3;
     static constexpr int DEADLOCK_REDIRECT = 5;
     static constexpr int DEADLOCK_ABORT    = 7;
 
-    // ─── Kontext-Management ───────────────────────────────────────────────
     bool m_summarizing = false;
     static constexpr int CTX_SUMMARIZE_THRESHOLD = 80;
 
-    // ─── Token-Statistik ──────────────────────────────────────────────────
     int m_generatedTokens = 0;
     int m_totalTokens     = 0;
     int m_promptTokens    = 0;
     int m_ctxSize         = 0;
 
-    // ─── Neu: Chat-Template State ─────────────────────────────────────────
-    // Zuletzt vom GGUF erkanntes Preset (für Preset::Auto-Modus).
-    // Wird in onChatTemplateDetected() gesetzt bevor modelLoaded() kommt.
-    // Default ChatML — sicherer Fallback falls kein Modell geladen ist.
     ChatTemplate::Preset m_detectedPreset = ChatTemplate::Preset::ChatML;
 };
