@@ -10,35 +10,22 @@
 #include "CommandProcessor.h"
 #include "ChatLogger.h"
 #include "AppConfig.h"
+#include "ChatTemplate.h"
 
 // ─── Agent ────────────────────────────────────────────────────────────────────
-// Pattern: Presenter aus MVP (Model-View-Presenter).
+// Pattern: Presenter aus MVP.
 //
-// Der Agent ist der Dirigent der gesamten Anwendungslogik:
-//   - Er besitzt ChatModel, McpManager, LlamaWorker, CommandProcessor
-//   - Er steuert den kompletten Agenten-Loop:
-//       User-Input → Kommando-Check → Generierung → Tool-Call-Erkennung →
-//       MCP-Dispatch → Ergebnis → nächste Generierung
-//   - Er kommuniziert mit dem MainWindow NUR über Signals (nach oben)
-//     und Slots (nach unten, von der UI)
+// Neu: Chat-Template und User-System-Prompt Integration.
 //
-// ─── Stop-Mechanismus ────────────────────────────────────────────────────────
-// Problem: m_generating = false reicht nicht — laufende MCP-Callbacks und
-// eingereihte invokeMethod-Aufrufe laufen danach noch durch.
+//   buildFullSystemPrompt()  — kombiniert User-Text + MCP-Tools
+//   applyChatTemplate()      — injiziert das richtige Template in ChatModel
+//   onChatTemplateDetected() — Slot für LlamaWorker::chatTemplateDetected()
 //
-// Lösung: m_sessionId (uint32, monoton steigend).
-// Jede Generierungs-Session bekommt eine eindeutige ID.
-// Alle Callbacks und Continuations prüfen ob ihre gespeicherte ID noch der
-// aktuellen entspricht. Falls nicht → verwerfen (Stale Callback).
-//
-// Pattern: Generation Stamp / Token (ähnlich wie Cancel-Token in .NET).
-// Analogie AVR: wie ein "Sequence Number" bei UART-Protokollen —
-// veraltete Pakete werden anhand der Sequenznummer verworfen.
-//
-// ─── Tool-Deadlock-Erkennung ─────────────────────────────────────────────────
-// Erkennt wenn dasselbe Tool wiederholt mit demselben Fehler scheitert.
-// Eskalation: 3x → Warnung, 5x → andere Lösung, 7x → Abbruch.
-// Schlüssel: "toolname|arg1=val1|arg2=val2" (kanonische Argumentdarstellung).
+// Reihenfolge beim Start:
+//   1. MCP-Server starten (async)
+//   2. LlamaWorker::initialize()
+//   3. chatTemplateDetected() → applyChatTemplate()
+//   4. modelLoaded() → buildFullSystemPrompt() → ChatModel::setSystemPrompt()
 
 class Agent : public QObject {
     Q_OBJECT
@@ -48,8 +35,6 @@ public:
     ~Agent() override;
 
     void start();
-
-    // Zugriff auf Worker für MainWindow (rebuildSamplers via invokeMethod)
     LlamaWorker *worker() const { return m_worker; }
 
 public slots:
@@ -73,29 +58,44 @@ private slots:
     void onStatsUpdate(int promptTokens, int ctxSize);
     void onError(const QString &error);
 
+    // ─── Neu: Chat-Template vom Worker ───────────────────────────────────
+    // Empfängt das erkannte Template direkt vor modelLoaded().
+    // Setzt m_detectedPreset und ruft applyChatTemplate() auf.
+    void onChatTemplateDetected(const QString &jinjaTemplate,
+                                ChatTemplate::Preset detectedPreset);
+
 private:
     void startGeneration(LlamaWorker::SamplerProfile profile);
     void handleToolCall(const QString &fullResponse, uint32_t sessionId);
     void filterToken(const QString &token);
     void emitStats();
 
-    // ─── Kontext-Management ───────────────────────────────────────────────
-    void checkContextUsage();   // >80% → auto-summarize
-    void summarizeContext();     // fasst Konversation zusammen, kürzt ChatModel
+    void checkContextUsage();
+    void summarizeContext();
 
-    // ─── Diff-Ansicht (LCS) ───────────────────────────────────────────────
     QString computeDiffHtml(const QString &before, const QString &after,
                             const QString &filename) const;
 
-    // Deadlock-Erkennung:
-    // Kanonischer Schlüssel aus Tool-Name + Argumenten (sortiert)
     QString toolCallKey(const QString &toolName, const QJsonObject &args) const;
-    // Eskalations-Prompt abhängig von Fehlerzähler
     QString deadlockEscalationPrompt(const QString &toolName, int count) const;
-
-    // JSON-Repair: versucht kaputtes JSON zu reparieren
-    // Gibt reparierten String zurück oder QString() bei Misserfolg
     QString repairJson(const QString &broken) const;
+
+    // ─── Neu: System-Prompt + Template ───────────────────────────────────
+
+    // Baut den vollständigen System-Prompt:
+    //   1. User-Text aus AppConfig::userSystemPrompt()  (leer = weggelassen)
+    //   2. MCP Tool-Beschreibungen aus McpManager
+    // Reihenfolge: User-Text zuerst — Modelle gewichten Prompt-Anfang stärker.
+    QString buildFullSystemPrompt() const;
+
+    // Liest das gewünschte Template aus AppConfig und injiziert es in ChatModel.
+    // Bei Preset::Auto wird m_detectedPreset verwendet.
+    // Bei Preset::Custom: Fallback ChatML bis Custom-Parsing implementiert ist.
+    //
+    // TODO Custom-Template: AppConfig::customChatTemplate() enthält einen
+    // JSON-String mit den Format-Feldern. Dieser muss geparst und in ein
+    // ChatTemplate-Struct umgewandelt werden. Aktuell Fallback auf ChatML.
+    void applyChatTemplate();
 
     // ─── Owned Objects ────────────────────────────────────────────────────
     QString           m_modelPath;
@@ -107,8 +107,6 @@ private:
     LlamaWorker      *m_worker = nullptr;
 
     // ─── Session-ID (Stop-Mechanismus) ───────────────────────────────────
-    // Wird bei jedem onStop() und onClearChat() inkrementiert.
-    // Callbacks speichern ihre ID bei Erstellung — veraltet = verwerfen.
     uint32_t m_sessionId = 0;
 
     // ─── Generierungs-State ───────────────────────────────────────────────
@@ -119,14 +117,9 @@ private:
     int     m_continuationCount = 0;
     static constexpr int MAX_CONTINUATIONS = 3;
 
-    // ─── Token-Budget ─────────────────────────────────────────────────────
-    // Maximale Länge eines Tool-Ergebnisses bevor es gekürzt wird.
-    // 6000 Zeichen ≈ ~1500 Tokens — großzügig aber nicht kontextflutend.
     static constexpr int MAX_TOOL_RESULT_CHARS = 6000;
 
     // ─── Deadlock-Tracking ────────────────────────────────────────────────
-    // Zählt aufeinanderfolgende Fehler pro Tool-Call-Schlüssel.
-    // Wird bei jedem erfolgreichen Tool-Call geleert.
     QHash<QString, int> m_toolFailCount;
 
     static constexpr int DEADLOCK_WARN     = 3;
@@ -135,11 +128,17 @@ private:
 
     // ─── Kontext-Management ───────────────────────────────────────────────
     bool m_summarizing = false;
-    static constexpr int CTX_SUMMARIZE_THRESHOLD = 80;  // % Auslastung
+    static constexpr int CTX_SUMMARIZE_THRESHOLD = 80;
 
     // ─── Token-Statistik ──────────────────────────────────────────────────
     int m_generatedTokens = 0;
     int m_totalTokens     = 0;
     int m_promptTokens    = 0;
     int m_ctxSize         = 0;
+
+    // ─── Neu: Chat-Template State ─────────────────────────────────────────
+    // Zuletzt vom GGUF erkanntes Preset (für Preset::Auto-Modus).
+    // Wird in onChatTemplateDetected() gesetzt bevor modelLoaded() kommt.
+    // Default ChatML — sicherer Fallback falls kein Modell geladen ist.
+    ChatTemplate::Preset m_detectedPreset = ChatTemplate::Preset::ChatML;
 };

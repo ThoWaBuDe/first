@@ -29,55 +29,39 @@ void LlamaWorker::cleanup()
     if (m_model)       { llama_model_free(AS_MODEL(m_model));           m_model       = nullptr; }
 }
 
-// ─── buildChatSampler ────────────────────────────────────────────────────────
-// Liest Parameter aus AppConfig — werden beim nächsten rebuild() übernommen.
-// Chain: Top-K → Temp → Top-P → Min-P → Dist
 void *LlamaWorker::buildChatSampler()
 {
     const AppConfig &cfg = AppConfig::instance();
-
     llama_sampler_chain_params p = llama_sampler_chain_default_params();
     llama_sampler *chain = llama_sampler_chain_init(p);
-
     llama_sampler_chain_add(chain, llama_sampler_init_top_k(cfg.chatTopK()));
     llama_sampler_chain_add(chain, llama_sampler_init_temp(cfg.chatTemp()));
     llama_sampler_chain_add(chain, llama_sampler_init_top_p(cfg.chatTopP(), 1));
     llama_sampler_chain_add(chain, llama_sampler_init_min_p(cfg.chatMinP(), 1));
     llama_sampler_chain_add(chain, llama_sampler_init_dist(42));
-
     return chain;
 }
 
-// ─── buildToolSampler ────────────────────────────────────────────────────────
 void *LlamaWorker::buildToolSampler()
 {
     const AppConfig &cfg = AppConfig::instance();
-
     llama_sampler_chain_params p = llama_sampler_chain_default_params();
     llama_sampler *chain = llama_sampler_chain_init(p);
-
     llama_sampler_chain_add(chain, llama_sampler_init_top_k(cfg.toolTopK()));
     llama_sampler_chain_add(chain, llama_sampler_init_temp(cfg.toolTemp()));
     llama_sampler_chain_add(chain, llama_sampler_init_top_p(cfg.toolTopP(), 1));
     llama_sampler_chain_add(chain, llama_sampler_init_min_p(cfg.toolMinP(), 1));
     llama_sampler_chain_add(chain, llama_sampler_init_dist(1337));
-
     return chain;
 }
 
-// ─── rebuildSamplers ─────────────────────────────────────────────────────────
-// Wird vom Config-Dialog aufgerufen wenn Sampler-Parameter geändert wurden.
-// Gibt die alten Sampler frei und baut neue mit den aktuellen AppConfig-Werten.
-// Muss im Worker-Thread aufgerufen werden (via QMetaObject::invokeMethod).
 void LlamaWorker::rebuildSamplers()
 {
     if (m_samplerChat) { llama_sampler_free(AS_SAMPLER(m_samplerChat)); m_samplerChat = nullptr; }
     if (m_samplerTool) { llama_sampler_free(AS_SAMPLER(m_samplerTool)); m_samplerTool = nullptr; }
-
     m_samplerChat = buildChatSampler();
     m_samplerTool = buildToolSampler();
-    m_sampler     = m_samplerChat;  // default zurücksetzen
-
+    m_sampler     = m_samplerChat;
     emit samplersRebuilt();
 }
 
@@ -85,9 +69,7 @@ void LlamaWorker::rebuildSamplers()
 void LlamaWorker::initialize(const QString &modelPath)
 {
     qDebug() << "ModellPfad: " << modelPath;
-
     cleanup();
-
     llama_backend_init();
 
     llama_model_params modelParams = llama_model_default_params();
@@ -100,7 +82,6 @@ void LlamaWorker::initialize(const QString &modelPath)
     }
 
     const AppConfig &cfg = AppConfig::instance();
-
     llama_context_params ctxParams = llama_context_default_params();
     ctxParams.n_ctx           = cfg.contextSize();
     ctxParams.n_batch         = cfg.batchSize();
@@ -117,8 +98,33 @@ void LlamaWorker::initialize(const QString &modelPath)
     m_samplerChat = buildChatSampler();
     m_samplerTool = buildToolSampler();
     m_sampler     = m_samplerChat;
-
     m_initialized = true;
+
+    // ─── Chat-Template aus GGUF auslesen ─────────────────────────────────
+    // llama_model_chat_template() liest das Feld "tokenizer.chat_template"
+    // aus den GGUF-Metadaten. Gibt nullptr zurück wenn kein Template
+    // eingebettet ist (ältere Modelle, manche Fine-Tunes).
+    //
+    // Der Pointer zeigt in den internen Modell-Speicher — kein free() nötig.
+    // Lebensdauer = Lebensdauer des llama_model*.
+    //
+    // Analogie AVR: wie das Lesen eines Flash-Bereichs der beim Flashen
+    // vom Hersteller befüllt wurde — read-only, immer verfügbar solange
+    // das Modell im Speicher ist.
+    //
+    // TODO: llama.cpp bietet auch llama_chat_apply_template() an, die den
+    // Jinja2-String direkt rendern kann. Das würde die Heuristik in
+    // ChatTemplate::detectFromJinja() überflüssig machen und wäre robuster
+    // für unbekannte Modelle. Kandidat für Stufe 2 wenn Custom-Templates
+    // implementiert werden.
+    const char *rawTmpl = llama_model_chat_template(AS_MODEL(m_model), nullptr);
+    QString jinjaTemplate = rawTmpl ? QString::fromUtf8(rawTmpl) : QString();
+    ChatTemplate::Preset detected = ChatTemplate::detectFromJinja(jinjaTemplate);
+
+    // chatTemplateDetected VOR modelLoaded() senden —
+    // Agent::onChatTemplateDetected() muss ChatModel konfigurieren bevor
+    // onModelLoaded() den System-Prompt setzt und buildPrompt() nutzt.
+    emit chatTemplateDetected(jinjaTemplate, detected);
     emit modelLoaded();
 }
 

@@ -2,6 +2,7 @@
 #include <QObject>
 #include <QString>
 #include <QSettings>
+#include "ChatTemplate.h"
 
 // ─── AppConfig ────────────────────────────────────────────────────────────────
 // Zentrales Konfigurations-Singleton.
@@ -11,16 +12,11 @@
 //
 // Zwei Klassen von Parametern:
 //   Sofort wirksam  — Schwellen, Sampler-Werte, Logging → Agent übernimmt live
-//   Neustart nötig  — Modellpfad, n_ctx → LlamaWorker::cleanup()+initialize()
+//   Neustart nötig  — Modellpfad, n_ctx, Chat-Template → LlamaWorker::cleanup()+initialize()
 //
 // Verwendung:
 //   AppConfig::instance().modelPath()         // lesen
 //   AppConfig::instance().setModelPath(p);    // setzen + sofort in Datei speichern
-//
-// Warum kein QSettings direkt überall?
-//   AppConfig kapselt die Key-Strings und Defaultwerte an einem Ort.
-//   Tippfehler in Key-Strings sind damit ausgeschlossen.
-//   Außerdem kann AppConfig Änderungen per Signal weitermelden.
 
 class AppConfig : public QObject {
     Q_OBJECT
@@ -28,17 +24,14 @@ class AppConfig : public QObject {
 public:
     static AppConfig &instance();
 
-    // Laden/Speichern (wird automatisch aufgerufen)
     void load();
     void save();
 
     // ─── Modell ───────────────────────────────────────────────────────────
-    // Neustart nötig wenn geändert.
     QString modelPath() const          { return m_modelPath; }
     void setModelPath(const QString &v){ m_modelPath = v; save(); emit modelPathChanged(v); }
 
     // ─── Sampler Chat ─────────────────────────────────────────────────────
-    // Sofort wirksam (nach nächster Generierung).
     int     chatTopK() const           { return m_chatTopK; }
     float   chatTemp() const           { return m_chatTemp; }
     float   chatTopP() const           { return m_chatTopP; }
@@ -59,14 +52,12 @@ public:
     void setToolMinP(float v)          { m_toolMinP = v; save(); }
 
     // ─── Kontext ──────────────────────────────────────────────────────────
-    // Neustart nötig wenn geändert.
     int     contextSize() const        { return m_contextSize; }
     int     batchSize() const          { return m_batchSize; }
     void setContextSize(int v)         { m_contextSize = v; save(); }
     void setBatchSize(int v)           { m_batchSize = v; save(); }
 
     // ─── Agent-Verhalten ──────────────────────────────────────────────────
-    // Sofort wirksam.
     int     summarizeThreshold() const { return m_summarizeThreshold; }
     int     maxContinuations() const   { return m_maxContinuations; }
     int     deadlockWarn() const       { return m_deadlockWarn; }
@@ -81,7 +72,6 @@ public:
     void setDeadlockAbort(int v)       { m_deadlockAbort = v; save(); }
 
     // ─── Sandbox ──────────────────────────────────────────────────────────
-    // Neustart nötig wenn geändert.
     QString sandboxPath() const        { return m_sandboxPath; }
     void setSandboxPath(const QString &v){ m_sandboxPath = v; save(); }
 
@@ -96,15 +86,37 @@ public:
                                          emit chatLoggingChanged(v); }
     void setChatLogDir(const QString &v){ m_chatLogDir = v; save(); }
 
-signals:
-    // Sofort-wirksame Änderungen
-    void chatLoggingChanged(bool enabled);
+    // ─── Chat-Template ────────────────────────────────────────────────────
+    // Neustart nötig wenn geändert.
+    // detectedJinjaTemplate: vom LlamaWorker nach Modell-Laden gesetzt,
+    // wird NICHT persistiert (kommt immer neu aus dem GGUF).
+    ChatTemplate::Preset chatTemplatePreset() const  { return m_chatTemplatePreset; }
+    QString customChatTemplate()  const              { return m_customChatTemplate; }
+    QString detectedJinjaTemplate() const            { return m_detectedJinjaTemplate; }
 
-    // Neustart-nötig Änderungen — MainWindow zeigt Hinweis
+    void setChatTemplatePreset(ChatTemplate::Preset v) {
+        m_chatTemplatePreset = v; save(); emit chatTemplateChanged();
+    }
+    void setCustomChatTemplate(const QString &v) {
+        m_customChatTemplate = v; save(); emit chatTemplateChanged();
+    }
+    // Kein save() — kommt aus GGUF, nur RAM, nicht persistiert
+    void setDetectedJinjaTemplate(const QString &v) { m_detectedJinjaTemplate = v; }
+
+    // ─── User System-Prompt ───────────────────────────────────────────────
+    // Sofort wirksam nach /clear oder Neustart.
+    // Wird dem MCP-Tool-Prompt vorangestellt (User-Wünsche haben Vorrang).
+    QString userSystemPrompt() const           { return m_userSystemPrompt; }
+    void setUserSystemPrompt(const QString &v) { m_userSystemPrompt = v; save(); }
+
+signals:
+    void chatLoggingChanged(bool enabled);
     void modelPathChanged(const QString &path);
 
+    // Chat-Template oder User-Prompt geändert → Neustart-Hinweis im UI
+    void chatTemplateChanged();
+
 private:
-    // Singleton: privater Konstruktor
     explicit AppConfig(QObject *parent = nullptr);
 
     QSettings m_settings;
@@ -132,9 +144,17 @@ private:
     int     m_deadlockAbort       = 7;
     int     m_maxToolResultChars  = 6000;
 
-    QString m_sandboxPath     = "";  // leer = ~/llamatools/ (default)
+    QString m_sandboxPath     = "";
     QString m_tavilyApiKey    = "";
 
     bool    m_chatLoggingEnabled = false;
-    QString m_chatLogDir      = "";  // leer = ~/llamatools/chat_log/
+    QString m_chatLogDir      = "";
+
+    // ─── Chat-Template ────────────────────────────────────────────────────
+    ChatTemplate::Preset m_chatTemplatePreset   = ChatTemplate::Preset::Auto;
+    QString              m_customChatTemplate   = "";
+    QString              m_detectedJinjaTemplate = "";  // nicht persistiert
+
+    // ─── User System-Prompt ───────────────────────────────────────────────
+    QString m_userSystemPrompt = "";
 };

@@ -5,28 +5,22 @@
 #include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QCheckBox>
+#include <QComboBox>
+#include <QTextEdit>
 #include <QLabel>
 #include <QPushButton>
 #include <QGroupBox>
+#include "ChatTemplate.h"
 
 // ─── ConfigDialog ─────────────────────────────────────────────────────────────
 // Modaler QDialog mit Tabs für alle AppConfig-Parameter.
 //
 // Tabs:
-//   Modell   — Pfad, n_ctx, Batch-Size, Modell-Browser
-//   Sampler  — Chat und Tool Profile nebeneinander
-//   Agent    — Schwellen, Continuations, Token-Budget
-//   Logging  — Chat-Log an/aus, Pfad, Tavily API Key
-//
-// Pattern: Model-View-Sync
-//   loadFromConfig() → Widgets mit AppConfig-Werten befüllen
-//   saveToConfig()   → Widget-Werte nach AppConfig schreiben
-//   Klassen: "Sofort wirksam" vs "Neustart nötig" werden markiert
-//
-// Neustart-nötig Parameter bekommen ein ⚠ Icon und einen Hinweis.
-// Sofort-wirksam Parameter werden direkt in AppConfig geschrieben —
-// der Agent übernimmt sie beim nächsten Aufruf.
-
+//   Modell           — Pfad, n_ctx, Batch-Size
+//   Sampler          — Chat und Tool Profile
+//   Agent            — Schwellen, Continuations, Token-Budget
+//   Logging          — Chat-Log, Tavily API Key
+//   Template & Prompt — Chat-Template ComboBox + User System-Prompt  ← NEU
 class ConfigDialog : public QDialog {
     Q_OBJECT
 
@@ -34,11 +28,8 @@ public:
     explicit ConfigDialog(QWidget *parent = nullptr);
 
 signals:
-    // Emittiert wenn Sampler-Parameter geändert wurden → LlamaWorker::rebuildSamplers()
     void samplersChanged();
-    // Emittiert wenn Neustart-nötig Parameter geändert wurden
     void restartRequired();
-    // Emittiert wenn Logging-Status geändert wurde
     void loggingChanged(bool enabled);
 
 private slots:
@@ -53,11 +44,11 @@ private:
     QWidget *createSamplerTab();
     QWidget *createAgentTab();
     QWidget *createLoggingTab();
+    QWidget *createTemplateTab();   // ← NEU
 
     void loadFromConfig();
     void saveToConfig();
 
-    // Helper: SpinBox mit Label erstellen
     QDoubleSpinBox *makeDoubleSpinBox(double min, double max, double step,
                                       int decimals, double value);
     QSpinBox       *makeSpinBox(int min, int max, int value);
@@ -69,12 +60,10 @@ private:
     QLabel    *m_restartHint;
 
     // ─── Sampler Tab ──────────────────────────────────────────────────────
-    // Chat
     QSpinBox       *m_chatTopK;
     QDoubleSpinBox *m_chatTemp;
     QDoubleSpinBox *m_chatTopP;
     QDoubleSpinBox *m_chatMinP;
-    // Tool
     QSpinBox       *m_toolTopK;
     QDoubleSpinBox *m_toolTemp;
     QDoubleSpinBox *m_toolTopP;
@@ -93,7 +82,14 @@ private:
     QLineEdit *m_chatLogDir;
     QLineEdit *m_tavilyApiKey;
 
-    // Welche Gruppen wurden verändert (für Signals)
+    // ─── Template & Prompt Tab ────────────────────────────────────────────
+    QComboBox *m_chatTemplateCombo;     // Preset-Auswahl (Auto/ChatML/Llama3/...)
+    QLabel    *m_detectedTemplateLabel; // zeigt was aus GGUF erkannt wurde
+    QTextEdit *m_customTemplateEdit;    // nur aktiv bei "Custom"
+    QLabel    *m_customTemplateLabel;   // Label dazu (zusammen ein/ausblenden)
+    QTextEdit *m_userSystemPrompt;      // freier User-Text vor MCP-Prompts
+
+    // Welche Gruppen wurden verändert
     bool m_samplersChanged  = false;
     bool m_restartNeeded    = false;
     bool m_loggingChanged   = false;

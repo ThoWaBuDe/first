@@ -1,19 +1,12 @@
 #include "AppConfig.h"
 #include <QStandardPaths>
 
-// ─── Singleton ────────────────────────────────────────────────────────────────
-// Statische lokale Variable: wird beim ersten Aufruf von instance() erzeugt
-// und lebt bis Programmende. Thread-safe seit C++11 (magic statics).
 AppConfig &AppConfig::instance()
 {
     static AppConfig inst;
     return inst;
 }
 
-// ─── Konstruktor ──────────────────────────────────────────────────────────────
-// QSettings mit INI-Format: ~/.config/LlamaQt/LlamaQt.conf
-// INI statt native Format (Registry auf Windows) weil es lesbar und
-// editierbar ist — der User kann Einstellungen direkt ändern.
 AppConfig::AppConfig(QObject *parent)
     : QObject(parent)
     , m_settings(QSettings::IniFormat,
@@ -24,15 +17,18 @@ AppConfig::AppConfig(QObject *parent)
 }
 
 // ─── load ─────────────────────────────────────────────────────────────────────
-// Liest alle Werte aus der .conf Datei.
-// Falls ein Key nicht vorhanden ist → Default-Wert bleibt erhalten.
-// Pattern: Defensive Read — fehlende Keys sind kein Fehler.
 void AppConfig::load()
 {
     m_settings.beginGroup("Model");
-    m_modelPath   = m_settings.value("path",        m_modelPath).toString();
-    m_contextSize = m_settings.value("context_size",m_contextSize).toInt();
-    m_batchSize   = m_settings.value("batch_size",  m_batchSize).toInt();
+    m_modelPath   = m_settings.value("path",         m_modelPath).toString();
+    m_contextSize = m_settings.value("context_size", m_contextSize).toInt();
+    m_batchSize   = m_settings.value("batch_size",   m_batchSize).toInt();
+    // Chat-Template Preset als int gespeichert (enum-Wert)
+    m_chatTemplatePreset = static_cast<ChatTemplate::Preset>(
+        m_settings.value("chat_template_preset",
+            static_cast<int>(ChatTemplate::Preset::Auto)).toInt());
+    m_customChatTemplate = m_settings.value("custom_chat_template", "").toString();
+    // m_detectedJinjaTemplate wird NICHT geladen — kommt immer frisch aus dem GGUF
     m_settings.endGroup();
 
     m_settings.beginGroup("SamplerChat");
@@ -50,13 +46,14 @@ void AppConfig::load()
     m_settings.endGroup();
 
     m_settings.beginGroup("Agent");
-    m_summarizeThreshold = m_settings.value("summarize_threshold", m_summarizeThreshold).toInt();
-    m_maxContinuations   = m_settings.value("max_continuations",   m_maxContinuations).toInt();
-    m_deadlockWarn       = m_settings.value("deadlock_warn",       m_deadlockWarn).toInt();
-    m_deadlockRedirect   = m_settings.value("deadlock_redirect",   m_deadlockRedirect).toInt();
-    m_deadlockAbort      = m_settings.value("deadlock_abort",      m_deadlockAbort).toInt();
+    m_summarizeThreshold = m_settings.value("summarize_threshold",  m_summarizeThreshold).toInt();
+    m_maxContinuations   = m_settings.value("max_continuations",    m_maxContinuations).toInt();
+    m_deadlockWarn       = m_settings.value("deadlock_warn",        m_deadlockWarn).toInt();
+    m_deadlockRedirect   = m_settings.value("deadlock_redirect",    m_deadlockRedirect).toInt();
+    m_deadlockAbort      = m_settings.value("deadlock_abort",       m_deadlockAbort).toInt();
     m_maxToolResultChars = m_settings.value("max_tool_result_chars",m_maxToolResultChars).toInt();
-    m_sandboxPath        = m_settings.value("sandbox_path",        m_sandboxPath).toString();
+    m_sandboxPath        = m_settings.value("sandbox_path",         m_sandboxPath).toString();
+    m_userSystemPrompt   = m_settings.value("user_system_prompt",   "").toString();
     m_settings.endGroup();
 
     m_settings.beginGroup("WebSearch");
@@ -70,15 +67,15 @@ void AppConfig::load()
 }
 
 // ─── save ─────────────────────────────────────────────────────────────────────
-// Schreibt alle Werte in die .conf Datei.
-// Wird nach jeder set*()-Methode aufgerufen → immer konsistent auf Disk.
-// QSettings::sync() wird intern von QSettings beim Schreiben aufgerufen.
 void AppConfig::save()
 {
     m_settings.beginGroup("Model");
-    m_settings.setValue("path",         m_modelPath);
-    m_settings.setValue("context_size", m_contextSize);
-    m_settings.setValue("batch_size",   m_batchSize);
+    m_settings.setValue("path",                 m_modelPath);
+    m_settings.setValue("context_size",         m_contextSize);
+    m_settings.setValue("batch_size",           m_batchSize);
+    m_settings.setValue("chat_template_preset", static_cast<int>(m_chatTemplatePreset));
+    m_settings.setValue("custom_chat_template", m_customChatTemplate);
+    // m_detectedJinjaTemplate wird bewusst NICHT gespeichert
     m_settings.endGroup();
 
     m_settings.beginGroup("SamplerChat");
@@ -96,14 +93,17 @@ void AppConfig::save()
     m_settings.endGroup();
 
     m_settings.beginGroup("Agent");
-    m_settings.setValue("summarize_threshold",  m_summarizeThreshold);
-    m_settings.setValue("max_continuations",    m_maxContinuations);
-    m_settings.setValue("deadlock_warn",        m_deadlockWarn);
-    m_settings.setValue("deadlock_redirect",    m_deadlockRedirect);
-    m_settings.setValue("deadlock_abort",       m_deadlockAbort);
-    m_settings.setValue("max_tool_result_chars",m_maxToolResultChars);
-    m_settings.setValue("sandbox_path",         m_sandboxPath);
-    m_settings.endGroup();    m_settings.beginGroup("WebSearch");
+    m_settings.setValue("summarize_threshold",   m_summarizeThreshold);
+    m_settings.setValue("max_continuations",     m_maxContinuations);
+    m_settings.setValue("deadlock_warn",         m_deadlockWarn);
+    m_settings.setValue("deadlock_redirect",     m_deadlockRedirect);
+    m_settings.setValue("deadlock_abort",        m_deadlockAbort);
+    m_settings.setValue("max_tool_result_chars", m_maxToolResultChars);
+    m_settings.setValue("sandbox_path",          m_sandboxPath);
+    m_settings.setValue("user_system_prompt",    m_userSystemPrompt);
+    m_settings.endGroup();
+
+    m_settings.beginGroup("WebSearch");
     m_settings.setValue("tavily_api_key", m_tavilyApiKey);
     m_settings.endGroup();
 
