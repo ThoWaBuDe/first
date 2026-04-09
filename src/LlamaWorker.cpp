@@ -8,11 +8,38 @@
 #include <QDebug>
 #include <vector>
 #include <string>
-#include <numeric>  // für std::accumulate
+#include <numeric>      // std::accumulate
+
+// POSIX — für open()/read()/close() auf /dev/urandom
+#include <fcntl.h>
+#include <unistd.h>
 
 #define AS_MODEL(p)   reinterpret_cast<llama_model*>(p)
 #define AS_CTX(p)     reinterpret_cast<llama_context*>(p)
 #define AS_SAMPLER(p) reinterpret_cast<llama_sampler*>(p)
+
+// ─── randomSeed ──────────────────────────────────────────────────────────────
+// Liest 4 Byte aus /dev/urandom — dem Kernel-CSPRNG.
+// Warum /dev/urandom und nicht /dev/random?
+//   /dev/random blockiert wenn der Entropie-Pool leer ist (selten, aber möglich).
+//   /dev/urandom blockiert nie und ist für unseren Zweck (Sampler-Seed) völlig
+//   ausreichend — wir brauchen keine kryptographische Stärke, nur Nicht-Determinis-
+//   mus. Seit Linux 4.8 sind beide intern identisch implementiert.
+//
+// Fallback: time(nullptr) — schlechter, aber besser als ein fester Wert.
+// Pattern: Defense in Depth — jede Ebene hat einen Fallback.
+static uint32_t randomSeed()
+{
+    uint32_t seed = 0;
+    int fd = ::open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        ::read(fd, &seed, sizeof(seed));
+        ::close(fd);
+    }
+    if (seed == 0)                              // open() fehlgeschlagen
+        seed = static_cast<uint32_t>(time(nullptr));
+    return seed;
+}
 
 LlamaWorker::LlamaWorker(QObject *parent)
     : QObject(parent)
@@ -32,6 +59,11 @@ void LlamaWorker::cleanup()
     if (m_model)       { llama_model_free(AS_MODEL(m_model));           m_model       = nullptr; }
 }
 
+// ─── buildChatSampler / buildToolSampler ─────────────────────────────────────
+// Der Dist-Sampler bekommt hier noch einen Platzhalter-Seed (0).
+// Der echte Seed wird in doGenerate() kurz vor jeder Generation gesetzt —
+// siehe refreshDistSampler(). So bleibt die Sampler-Kette stabil (kein
+// rebuild nötig) aber der PRNG-Startzustand ist jedes Mal frisch.
 void *LlamaWorker::buildChatSampler()
 {
     const AppConfig &cfg = AppConfig::instance();
@@ -41,7 +73,7 @@ void *LlamaWorker::buildChatSampler()
     llama_sampler_chain_add(chain, llama_sampler_init_temp(cfg.chatTemp()));
     llama_sampler_chain_add(chain, llama_sampler_init_top_p(cfg.chatTopP(), 1));
     llama_sampler_chain_add(chain, llama_sampler_init_min_p(cfg.chatMinP(), 1));
-    llama_sampler_chain_add(chain, llama_sampler_init_dist(42));
+    llama_sampler_chain_add(chain, llama_sampler_init_dist(0)); // Seed wird in doGenerate() ersetzt
     return chain;
 }
 
@@ -54,8 +86,35 @@ void *LlamaWorker::buildToolSampler()
     llama_sampler_chain_add(chain, llama_sampler_init_temp(cfg.toolTemp()));
     llama_sampler_chain_add(chain, llama_sampler_init_top_p(cfg.toolTopP(), 1));
     llama_sampler_chain_add(chain, llama_sampler_init_min_p(cfg.toolMinP(), 1));
-    llama_sampler_chain_add(chain, llama_sampler_init_dist(1337));
+    llama_sampler_chain_add(chain, llama_sampler_init_dist(0)); // Seed wird in doGenerate() ersetzt
     return chain;
+}
+
+// ─── refreshDistSampler ──────────────────────────────────────────────────────
+// Tauscht den letzten Sampler in der Kette (= Dist) gegen einen neuen mit
+// frischem Seed aus. Die anderen Sampler (TopK, Temp, TopP, MinP) bleiben
+// unberührt — ihre Parameter ändern sich nicht.
+//
+// Warum den letzten Sampler tauschen und nicht die ganze Kette neu bauen?
+//   - buildChatSampler() liest aus AppConfig — das ist okay, aber unnötig
+//     wenn sich nur der Seed ändert.
+//   - llama_sampler_chain_remove() + re-add wäre sauberer, aber die llama.cpp
+//     C-API bietet das nicht direkt. Stattdessen: alten Dist freigeben,
+//     neuen anlegen, an die Kette hängen.
+//
+// ACHTUNG: llama_sampler_chain_add() hängt immer ans Ende. Der Dist-Sampler
+// muss also wirklich der letzte in der Kette sein — das ist in buildChatSampler/
+// buildToolSampler so sichergestellt.
+//
+// Für Mikrocontroller-Denker: das ist wie ein Timer-Reload-Register — du
+// schreibst nur den Startwert neu, die Timer-Hardware läuft dann von dort.
+void LlamaWorker::refreshDistSampler(void *chain)
+{
+    // llama_sampler_chain_remove() entfernt per Index.
+    // Index 4 = letzter Sampler (0=TopK, 1=Temp, 2=TopP, 3=MinP, 4=Dist).
+    llama_sampler *old = llama_sampler_chain_remove(AS_SAMPLER(chain), 4);
+    if (old) llama_sampler_free(old);
+    llama_sampler_chain_add(AS_SAMPLER(chain), llama_sampler_init_dist(randomSeed()));
 }
 
 void LlamaWorker::rebuildSamplers()
@@ -106,7 +165,6 @@ void LlamaWorker::initialize(const QString &modelPath)
     // ─── Chat-Template aus GGUF auslesen ─────────────────────────────────
     const char *rawTmpl = llama_model_chat_template(AS_MODEL(m_model), nullptr);
     QString jinjaTemplate = rawTmpl ? QString::fromUtf8(rawTmpl) : QString();
-
     m_detectedPreset = ChatTemplate::detectFromJinja(jinjaTemplate);
 
     emit chatTemplateDetected(jinjaTemplate, m_detectedPreset);
@@ -126,11 +184,10 @@ const char *LlamaWorker::roleToStr(ChatMessage::Role role)
 }
 
 // ─── applyTemplate ───────────────────────────────────────────────────────────
+// Unverändert — siehe Original.
 QString LlamaWorker::applyTemplate(const QVector<ChatMessage> &messages) const
 {
     if (!m_model) return {};
-
-    // ── Stufe 1: llama_chat_apply_template ───────────────────────────────
 
     std::vector<std::string>         contents;
     std::vector<llama_chat_message>  msgs;
@@ -142,8 +199,7 @@ QString LlamaWorker::applyTemplate(const QVector<ChatMessage> &messages) const
         msgs.push_back({ roleToStr(m.role), contents.back().c_str() });
     }
 
-    // Template aus dem Modell extrahieren
-    const char * tmpl = llama_model_chat_template(AS_MODEL(m_model), nullptr);
+    const char *tmpl = llama_model_chat_template(AS_MODEL(m_model), nullptr);
 
     size_t totalContent = std::accumulate(
         contents.begin(), contents.end(), size_t(0),
@@ -151,35 +207,23 @@ QString LlamaWorker::applyTemplate(const QVector<ChatMessage> &messages) const
     size_t bufSize = totalContent * 2 + 1024;
 
     std::vector<char> buf(bufSize);
-
-    // KORREKTUR: Erster Parameter ist das Template (const char*), nicht das Model
     int result = llama_chat_apply_template(
-        tmpl,
-        msgs.data(),
-        msgs.size(),
-        true,         // add_ass: öffne Assistant-Turn am Ende
-        buf.data(),
-        static_cast<int32_t>(buf.size())
-        );
+        tmpl, msgs.data(), msgs.size(),
+        true, buf.data(), static_cast<int32_t>(buf.size()));
 
-    if (result > 0) {
+    if (result > 0)
         return QString::fromUtf8(buf.data(), result);
-    }
 
-    // Fallback bei zu kleinem Puffer
     if (result < 0 && bufSize < 512 * 1024) {
         bufSize = 512 * 1024;
         buf.resize(bufSize);
         result = llama_chat_apply_template(
-            tmpl,
-            msgs.data(), msgs.size(),
-            true, buf.data(), static_cast<int32_t>(buf.size())
-            );
+            tmpl, msgs.data(), msgs.size(),
+            true, buf.data(), static_cast<int32_t>(buf.size()));
         if (result > 0)
             return QString::fromUtf8(buf.data(), result);
     }
 
-    // ── Stufe 2: Fallback auf ChatTemplate ───────────────────────────────
     qWarning() << "LlamaWorker: llama_chat_apply_template fehlgeschlagen,"
                << "Fallback auf ChatTemplate-Preset:"
                << ChatTemplate::presetName(m_detectedPreset);
@@ -201,9 +245,28 @@ QString LlamaWorker::applyTemplate(const QVector<ChatMessage> &messages) const
     return fallbackModel.buildPrompt();
 }
 
-// ─── generate ────────────────────────────────────────────────────────────────
-void LlamaWorker::generate(const QVector<ChatMessage> &messages,
-                           LlamaWorker::SamplerProfile profile)
+// ─── doGenerate ──────────────────────────────────────────────────────────────
+// Private Hilfsmethode — enthält die gesamte Inference-Logik.
+//
+// Parameter clearCache:
+//   true  → llama_memory_clear() vor dem Encode — bisheriges Verhalten.
+//            Jeder generate()-Aufruf startet mit leerem KV-Cache.
+//            Nachteil: der gesamte Prompt muss jedes Mal neu durch llama_decode().
+//
+//   false → Cache bleibt erhalten — generateDelta()-Verhalten (Vorbereitung).
+//            Nur neue Tokens müssen encodiert werden.
+//            Voraussetzung: der Prompt ist ein echter Suffix des vorherigen.
+//            Noch nicht vollständig implementiert (n_past-Tracking fehlt),
+//            daher erstmal als struktureller Platzhalter.
+//
+// Warum hier und nicht in generate()?
+//   DRY-Prinzip (Don't Repeat Yourself). Der Token-Sampling-Loop ist ~40 Zeilen
+//   die bei zwei separaten Methoden doppelt gepflegt werden müssten.
+//   Eine private doGenerate() mit bool-Parameter ist das Standard-C++-Pattern
+//   für "zwei öffentliche Methoden, ein gemeinsamer Kern".
+void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
+                             SamplerProfile profile,
+                             bool clearCache)
 {
     if (!m_initialized) {
         emit errorOccurred("Worker nicht initialisiert.");
@@ -212,12 +275,20 @@ void LlamaWorker::generate(const QVector<ChatMessage> &messages,
 
     m_stopFlag.store(false);
 
+    // Sampler-Profil wählen
     switch (profile) {
     case SamplerProfile::Tool: m_sampler = m_samplerTool; break;
     default:                   m_sampler = m_samplerChat; break;
     }
 
-    llama_sampler_reset(AS_SAMPLER(m_sampler));
+    // ── Frischer Seed vor jeder Generation ───────────────────────────────
+    // Warum hier und nicht in buildChatSampler()?
+    //   buildChatSampler() wird nur beim Start und bei rebuildSamplers()
+    //   aufgerufen. Würden wir den Seed dort setzen, wäre er für alle
+    //   Generationen dieser Session gleich.
+    //   Hier, direkt vor dem encode, bekommt jede Generation einen eigenen
+    //   Startzustand — auch Retry-Versuche nach Tool-Fehlern.
+    refreshDistSampler(m_sampler);
 
     QString promptQStr = applyTemplate(messages);
     if (promptQStr.isEmpty()) {
@@ -225,9 +296,11 @@ void LlamaWorker::generate(const QVector<ChatMessage> &messages,
         return;
     }
 
-    const std::string promptStr = promptQStr.toStdString();
-    const llama_vocab *vocab    = llama_model_get_vocab(AS_MODEL(m_model));
+    const std::string  promptStr = promptQStr.toStdString();
+    const llama_vocab *vocab     = llama_model_get_vocab(AS_MODEL(m_model));
 
+    // Tokenisierung: erst mit geschätzter Größe, bei Überlauf resize + retry.
+    // Das ist das Standard-Pattern aus der llama.cpp Dokumentation.
     int maxTokens = static_cast<int>(promptStr.size()) + 128;
     std::vector<llama_token> promptTokens(maxTokens);
 
@@ -235,7 +308,6 @@ void LlamaWorker::generate(const QVector<ChatMessage> &messages,
                                  static_cast<int32_t>(promptStr.size()),
                                  promptTokens.data(), static_cast<int32_t>(promptTokens.size()),
                                  true, true);
-
     if (nTokens < 0) {
         promptTokens.resize(-nTokens);
         llama_tokenize(vocab, promptStr.c_str(),
@@ -262,9 +334,21 @@ void LlamaWorker::generate(const QVector<ChatMessage> &messages,
         emit tokenGenerated(QString("[WARNUNG: Kontext fast voll: %1 Tokens]\n")
                                 .arg(n_ctx - nTokens));
 
-    llama_memory_t mem = llama_get_memory(AS_CTX(m_ctx));
-    llama_memory_clear(mem, false);
+    // ── Cache-Handling ────────────────────────────────────────────────────
+    if (clearCache) {
+        // Bisheriges Verhalten: KV-Cache komplett leeren.
+        // false = nur Metadaten löschen, Speicher bleibt allokiert (schneller).
+        llama_memory_t mem = llama_get_memory(AS_CTX(m_ctx));
+        llama_memory_clear(mem, false);
+    }
+    // else: Cache bleibt — generateDelta() Pfad.
+    // TODO: n_past-Tracking für echtes Delta-Encoding (nächste Ausbaustufe).
 
+    // ── Prompt encoden (Prefill) ──────────────────────────────────────────
+    // Der Prompt wird in Batches durch llama_decode() geschoben.
+    // llama_decode() füllt den KV-Cache und berechnet die Attention.
+    // n_batch ist die maximale Chunk-Größe (aus AppConfig/ctxParams).
+    // Producer/Consumer-Pattern: wir liefern Chunks, llama.cpp konsumiert sie.
     int processed = 0;
     while (processed < nTokens) {
         int chunkSize = std::min(n_batch, nTokens - processed);
@@ -278,9 +362,13 @@ void LlamaWorker::generate(const QVector<ChatMessage> &messages,
         if (m_stopFlag.load()) return;
     }
 
-    static const QString TOOL_STOP = "</tool_call>";
+    // ── Token-Sampling-Loop (Autoregressive Decode) ───────────────────────
+    // Jede Iteration: ein Token samplen, emittieren, in den Cache einspeisen.
+    // Das Modell "sieht" seinen eigenen Output als Input für den nächsten Token.
+    // Abbruch: EOG-Token, stopFlag, maxNewTokens, oder Tool-Stop-Sequenz.
+    static const QString TOOL_STOP  = "</tool_call>";
     QString fullResponse;
-    const int maxNewTokens = 8192;
+    const int maxNewTokens = 16384;
 
     for (int i = 0; i < maxNewTokens; ++i) {
         if (m_stopFlag.load()) break;
@@ -305,11 +393,30 @@ void LlamaWorker::generate(const QVector<ChatMessage> &messages,
     emit generationDone(fullResponse);
 }
 
+// ─── generate / generateDelta ────────────────────────────────────────────────
+// Zwei öffentliche Slots — thin wrapper um doGenerate().
+// Agent ruft generate() wie bisher. generateDelta() ist für späteres
+// KV-Cache-Rollback vorbereitet, aber noch nicht im Agent verdrahtet.
+
+void LlamaWorker::generate(const QVector<ChatMessage> &messages,
+                           LlamaWorker::SamplerProfile profile)
+{
+    doGenerate(messages, profile, /*clearCache=*/true);
+}
+
+void LlamaWorker::generateDelta(const QVector<ChatMessage> &messages,
+                                LlamaWorker::SamplerProfile profile)
+{
+    doGenerate(messages, profile, /*clearCache=*/false);
+}
+
+// ─── stopGeneration ──────────────────────────────────────────────────────────
 void LlamaWorker::stopGeneration()
 {
     m_stopFlag.store(true);
 }
 
+// ─── tokenToString ───────────────────────────────────────────────────────────
 QString LlamaWorker::tokenToString(int tokenId) const
 {
     const llama_vocab *vocab = llama_model_get_vocab(AS_MODEL(m_model));

@@ -110,12 +110,12 @@ static bool resolveAndCheck(const QString &rel, QString &fullPath, QString &reas
 }
 
 // ─── Limits ─────────────────────────────────────────────────────────────────
-static constexpr int MAX_READ_CHARS     = 4096;
-static constexpr int MAX_WRITE_CHARS    = 8192;
-static constexpr int MAX_LINES_READ     = 200;
-static constexpr int MAX_GREP_HITS      = 100;
+static constexpr int MAX_READ_CHARS     = 8192;
+static constexpr int MAX_WRITE_CHARS    = 16384;
+static constexpr int MAX_LINES_READ     = 300;
+static constexpr int MAX_GREP_HITS      = 200;
 static constexpr int MAX_TREE_DEPTH     = 6;
-static constexpr int MAX_MULTIPLE_FILES = 10;
+static constexpr int MAX_MULTIPLE_FILES = 15;
 
 // ─── JSON-RPC helpers ───────────────────────────────────────────────────────
 static void sendResponse(const QJsonObject &msg)

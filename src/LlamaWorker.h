@@ -3,30 +3,8 @@
 #include <QString>
 #include <QVector>
 #include <atomic>
-#include "ChatModel.h"    // für QVector<ChatMessage>
-#include "ChatTemplate.h" // für Fallback
-
-// ─── LlamaWorker ──────────────────────────────────────────────────────────────
-// llama.cpp Inference im Worker-Thread. Pattern: Active Object.
-//
-// Umbau: generate() bekommt jetzt QVector<ChatMessage> statt einen fertigen
-// Prompt-String. Der Worker baut den Prompt intern via
-// llama_chat_apply_template() — die Funktion liest das Chat-Template direkt
-// aus den GGUF-Metadaten des geladenen Modells.
-//
-// Warum im Worker und nicht im Agent?
-//   llama_chat_apply_template() braucht den llama_model* Pointer.
-//   Der lebt im Worker-Thread. Würde Agent ihn benutzen, wäre das ein
-//   Datenrace ohne Queue-Schutz.
-//   Pattern: den Zugriff auf ressource-gebundene Daten dort lassen wo
-//   die Ressource lebt — analog zum AVR wo du Peripherie-Register nur
-//   aus dem richtigen ISR-Kontext anfasst.
-//
-// Fallback:
-//   Falls llama_chat_apply_template() -1 zurückgibt (kein Template im GGUF,
-//   unbekanntes Format), fällt applyTemplate() auf ChatModel::buildPrompt()
-//   zurück — das bisherige Verhalten mit ChatTemplate-Struct.
-//   ChatTemplate.h bleibt deshalb erhalten.
+#include "ChatModel.h"
+#include "ChatTemplate.h"
 
 class LlamaWorker : public QObject {
     Q_OBJECT
@@ -41,10 +19,14 @@ public:
 public slots:
     void initialize(const QString &modelPath);
 
-    // Neu: bekommt rohe Nachrichten, baut Prompt intern via llama_chat_apply_template.
-    // profile steuert welcher Sampler verwendet wird (Chat=kreativ, Tool=deterministisch).
+    // Cache wird vor dem Encode geleert — bisheriges Verhalten.
     void generate(const QVector<ChatMessage> &messages,
                   LlamaWorker::SamplerProfile profile = LlamaWorker::SamplerProfile::Chat);
+
+    // Cache bleibt erhalten — Vorbereitung für Delta-Encoding / KV-Rollback.
+    // Noch nicht im Agent verdrahtet. n_past-Tracking folgt in nächster Ausbaustufe.
+    void generateDelta(const QVector<ChatMessage> &messages,
+                       LlamaWorker::SamplerProfile profile = LlamaWorker::SamplerProfile::Chat);
 
     void stopGeneration();
     void rebuildSamplers();
@@ -56,30 +38,23 @@ signals:
     void errorOccurred(const QString &error);
     void modelLoaded();
     void samplersRebuilt();
-
-    // Wird direkt vor modelLoaded() emittiert.
-    // jinjaTemplate: roher Jinja2-String aus GGUF ("tokenizer.chat_template").
-    //   Leer wenn kein Template eingebettet ist.
-    // detectedPreset: Heuristisch erkanntes Preset (nie Preset::Auto).
-    //   Wird für ConfigDialog-Anzeige und Fallback verwendet.
     void chatTemplateDetected(const QString &jinjaTemplate,
                               ChatTemplate::Preset detectedPreset);
 
 private:
-    // Baut den fertigen Prompt-String aus den Nachrichten.
-    //
-    // Strategie (zwei Stufen):
-    //   1. llama_chat_apply_template() — nutzt Template aus GGUF
-    //      Puffer-Größe: 2 × Summe aller Nachrichtenlängen (llama.cpp Empfehlung)
-    //      Gibt -1 zurück wenn kein Template vorhanden oder unbekannt → Fallback
-    //   2. Fallback: ChatModel::buildPromptFromMessages() mit m_detectedPreset
-    //      Bisheriges Verhalten, garantiert immer einen String zu liefern.
-    //
-    // add_ass=true: öffnet den Assistant-Turn am Ende — llama.cpp generiert
-    // ab dort. Entspricht dem bisherigen assistantStart am Ende von buildPrompt().
-    QString applyTemplate(const QVector<ChatMessage> &messages) const;
+    // Gemeinsamer Kern für generate() und generateDelta().
+    // clearCache=true  → llama_memory_clear() vor Encode
+    // clearCache=false → Cache bleibt, nur Delta encoden (TODO: n_past)
+    void doGenerate(const QVector<ChatMessage> &messages,
+                    SamplerProfile profile,
+                    bool clearCache);
 
-    // Hilfsfunktion: ChatMessage::Role → C-String für llama_chat_message
+    // Tauscht den Dist-Sampler (letzter in der Kette, Index 4) gegen
+    // einen neuen mit frischem Seed aus /dev/urandom.
+    // Wird in doGenerate() vor jeder Generation aufgerufen.
+    void refreshDistSampler(void *chain);
+
+    QString applyTemplate(const QVector<ChatMessage> &messages) const;
     static const char *roleToStr(ChatMessage::Role role);
 
     void *m_model       = nullptr;
@@ -91,8 +66,6 @@ private:
     std::atomic<bool> m_stopFlag{false};
     bool m_initialized = false;
 
-    // Zuletzt erkanntes Preset — für Fallback in applyTemplate().
-    // Wird in initialize() nach llama_model_chat_template() gesetzt.
     ChatTemplate::Preset m_detectedPreset = ChatTemplate::Preset::ChatML;
 
     QString tokenToString(int tokenId) const;
