@@ -46,6 +46,7 @@ public slots:
     void onUserMessage(const QString &text);
     void onStop();
     void onClearChat();
+    void onFileSavedByUser(const QString &filePath);
 
 signals:
     void appendChat(const QString &html, const QString &cssClass);

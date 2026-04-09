@@ -4,6 +4,7 @@
 #include <QEvent>
 #include "Agent.h"
 #include "ConfigDialog.h"
+#include "EditorDock.h"
 
 namespace Ui { class MainWindow; }
 
@@ -46,6 +47,8 @@ private:
 
     Ui::MainWindow *ui;
     Agent          *m_agent;
+
+    EditorDock      *m_editorDock;
 
     // MODEL_PATH kommt jetzt aus AppConfig — nicht mehr hardcodiert hier.
 

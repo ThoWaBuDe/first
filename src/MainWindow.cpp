@@ -32,6 +32,16 @@ void MainWindow::setupUi()
     addDockWidget(Qt::RightDockWidgetArea, ui->toolDock);
     ui->toolDock->setMinimumWidth(350);
 
+    m_editorDock = new EditorDock(this);
+    addDockWidget(Qt::BottomDockWidgetArea, m_editorDock);
+    m_editorDock->hide();   // Standard: eingeklappt
+
+    // EditorDock im Menü togglebar machen
+    QMenu *viewMenu = menuBar()->addMenu("&Ansicht");
+    viewMenu->addAction(m_editorDock->toggleViewAction());
+    // toggleViewAction() liefert eine QAction die den Dock ein-/ausblendet.
+    // Qt erstellt sie automatisch für jeden QDockWidget.
+
     // ─── chatView ──────────────────────────────────────────────────────────
     ui->chatView->document()->setDefaultStyleSheet(R"(
         body       { font-family: 'Noto Sans', sans-serif; font-size: 13px; }
@@ -168,6 +178,8 @@ void MainWindow::setupConnections()
             this,    &MainWindow::onInputEnabled);
     connect(m_agent, &Agent::statsUpdated,
             this,    &MainWindow::onStatsUpdated);
+    connect(m_editorDock, &EditorDock::fileSavedByUser,
+            m_agent,      &Agent::onFileSavedByUser);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

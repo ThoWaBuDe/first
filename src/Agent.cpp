@@ -228,6 +228,30 @@ void Agent::onClearChat()
     emit statusChanged("Bereit");
 }
 
+void Agent::onFileSavedByUser(const QString &filePath)
+{
+    // Dateiname ohne vollen Pfad für die Nachricht (lesbarer)
+    QString name = QFileInfo(filePath).fileName();
+
+    // Systemnachricht in den Chat — sichtbar für User und Modell.
+    // cssClass "system" = grau/kursiv (wie andere Systemhinweise).
+    QString notice = QString(
+                         "[System: User hat <b>%1</b> manuell gespeichert. "
+                         "Bitte Datei vor weiteren Änderungen neu einlesen.]")
+                         .arg(name.toHtmlEscaped());
+
+    emit appendChat(notice, "system");
+
+    // Auch in den ChatModel-Kontext injizieren damit das Modell es sieht.
+    // Als Tool-Ergebnis formatiert: das Modell kennt dieses Format bereits.
+    m_chatModel.addToolResult("editor_notify",
+                              QString("[User hat '%1' manuell bearbeitet und gespeichert. "
+                                      "Bitte read_file aufrufen bevor du str_replace oder "
+                                      "write_file verwendest.]").arg(name));
+
+    m_logger.logSystem(QString("User hat %1 manuell gespeichert.").arg(filePath));
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // PRIVATE SLOTS: Worker-Callbacks
 // ═════════════════════════════════════════════════════════════════════════════
