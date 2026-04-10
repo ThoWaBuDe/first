@@ -149,8 +149,6 @@ void LlamaWorker::initialize(const QString &modelPath)
     ctxParams.n_batch         = cfg.batchSize();
     ctxParams.n_ubatch        = cfg.batchSize();
     ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-    ctxParams.type_k = GGML_TYPE_Q8_0;
-    ctxParams.type_v = GGML_TYPE_Q8_0;
 
     m_ctx = llama_init_from_model(AS_MODEL(m_model), ctxParams);
     if (!m_ctx) {
@@ -336,32 +334,20 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
         emit tokenGenerated(QString("[WARNUNG: Kontext fast voll: %1 Tokens]\n")
                                 .arg(n_ctx - nTokens));
 
-    // ── Cache-Handling + Checkpoint ──────────────────────────────────────
-    // Checkpoint setzen: dieser Stand im KV-Cache gilt als "sauber".
-    // rollbackToCheckpoint() kann jederzeit hierhin zurückspringen.
-    //
-    // clearCache=true  (generate):      Cache leeren, m_nPast auf 0 setzen.
-    //                                   Checkpoint ist dann ebenfalls 0.
-    // clearCache=false (generateDelta): Cache bleibt stehen.
-    //                                   Checkpoint = aktuelles m_nPast.
-    //                                   Nur neue Tokens ab m_nPast encodieren.
+    // ── Cache-Handling ────────────────────────────────────────────────────
     if (clearCache) {
+        // Bisheriges Verhalten: KV-Cache komplett leeren.
+        // false = nur Metadaten löschen, Speicher bleibt allokiert (schneller).
         llama_memory_t mem = llama_get_memory(AS_CTX(m_ctx));
         llama_memory_clear(mem, false);
-        m_nPast = 0;
     }
-    // Checkpoint immer nach dem Cache-Handling setzen — egal ob clear oder nicht.
-    // Bei clearCache=true:  m_checkpoint = 0  (leerer Cache ist der Savestate)
-    // Bei clearCache=false: m_checkpoint = m_nPast (Ende der bisherigen History)
-    m_checkpoint = m_nPast;
+    // else: Cache bleibt — generateDelta() Pfad.
+    // TODO: n_past-Tracking für echtes Delta-Encoding (nächste Ausbaustufe).
 
     // ── Prompt encoden (Prefill) ──────────────────────────────────────────
     // Der Prompt wird in Batches durch llama_decode() geschoben.
     // llama_decode() füllt den KV-Cache und berechnet die Attention.
     // n_batch ist die maximale Chunk-Größe (aus AppConfig/ctxParams).
-    //
-    // Bei generateDelta(): promptTokens enthält nur die NEUEN Tokens
-    // (Tokens die m_nPast entsprechen stehen schon im Cache).
     // Producer/Consumer-Pattern: wir liefern Chunks, llama.cpp konsumiert sie.
     int processed = 0;
     while (processed < nTokens) {
@@ -372,8 +358,7 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
                                    .arg(processed).arg(nTokens));
             return;
         }
-        processed  += chunkSize;
-        m_nPast    += chunkSize;   // Cache-Schreibzeiger nachführen
+        processed += chunkSize;
         if (m_stopFlag.load()) return;
     }
 
@@ -383,7 +368,7 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
     // Abbruch: EOG-Token, stopFlag, maxNewTokens, oder Tool-Stop-Sequenz.
     static const QString TOOL_STOP  = "</tool_call>";
     QString fullResponse;
-    const int maxNewTokens = 16384;
+    const int maxNewTokens = 8192;
 
     for (int i = 0; i < maxNewTokens; ++i) {
         if (m_stopFlag.load()) break;
@@ -403,67 +388,15 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
             emit errorOccurred(QString("llama_decode fehlgeschlagen nach %1 Tokens.").arg(i));
             break;
         }
-        ++m_nPast;   // Jeder generierte Token landet ebenfalls im KV-Cache
     }
 
     emit generationDone(fullResponse);
 }
 
-// ─── rollbackToCheckpoint ────────────────────────────────────────────────────
-// Wirft alle KV-Cache-Einträge von m_checkpoint bis m_nPast weg.
-// Wird vom Agent aufgerufen wenn ein Tool-Call fehlschlägt oder der JSON-
-// Parser reparieren musste — in beiden Fällen soll das Modell es erneut
-// versuchen als ob der fehlerhafte Versuch nie stattgefunden hätte.
-//
-// llama_kv_cache_seq_rm(ctx, seq_id, p0, p1):
-//   ctx    = unser Kontext
-//   seq_id = 0  (wir nutzen nur eine Sequenz — kein Beam-Search)
-//   p0     = erste zu löschende Position (inklusiv)
-//   p1     = letzte zu löschende Position (exklusiv), -1 = bis Ende
-//
-// Nach dem Aufruf ist m_nPast == m_checkpoint.
-// Der nächste generateDelta()-Aufruf encodiert dann nur die korrigierten
-// Tokens ab dieser Position — genau wie ein AVR der nach einem UART-Fehler
-// den Empfangspuffer bis zur letzten gültigen Nachricht zurücksetzt.
-//
-// Warum seq_id=0?
-//   llama.cpp unterstützt mehrere parallele Sequenzen (für Beam-Search oder
-//   Speculative Decoding). Wir nutzen nur eine einzige (seq_id=0).
-//   Das ist der Standard-Fall für einfache Chat-Anwendungen.
-void LlamaWorker::rollbackToCheckpoint()
-{
-    if (!m_initialized) return;
-    if (m_nPast <= m_checkpoint) return;   // nichts zu tun
-
-    qDebug() << "LlamaWorker::rollbackToCheckpoint:"
-             << "m_nPast" << m_nPast << "→" << m_checkpoint
-             << "(" << (m_nPast - m_checkpoint) << "Tokens entfernt)";
-
-    // llama_kv_cache_seq_rm entfernt [p0, p1) aus Sequenz 0.
-    // p1 = -1 bedeutet: bis zum Ende des Cache.
-    llama_kv_cache_seq_rm(AS_CTX(m_ctx),
-                          /*seq_id=*/0,
-                          /*p0=*/m_checkpoint,
-                          /*p1=*/-1);
-
-    m_nPast = m_checkpoint;
-}
-
-
 // ─── generate / generateDelta ────────────────────────────────────────────────
 // Zwei öffentliche Slots — thin wrapper um doGenerate().
-//
-// generate():      Cache leeren → ganzen Prompt neu encodieren.
-//                  Sicher, immer korrekt. Einsatz: erster Turn,
-//                  nach /summarize, nach Context-Reset.
-//
-// generateDelta(): Cache bleibt → nur neue Tokens ab m_nPast encodieren.
-//                  Schneller bei langen Konversationen — System-Prompt und
-//                  bisherige History müssen nicht neu durch llama_decode().
-//                  Voraussetzung: neuer Prompt ist echter Suffix des alten,
-//                  d.h. bisherige Messages sind unverändert, nur neue wurden
-//                  hinten angehängt.
-//                  Einsatz im Agent-Loop: Tool-Ergebnis → nächste Generation.
+// Agent ruft generate() wie bisher. generateDelta() ist für späteres
+// KV-Cache-Rollback vorbereitet, aber noch nicht im Agent verdrahtet.
 
 void LlamaWorker::generate(const QVector<ChatMessage> &messages,
                            LlamaWorker::SamplerProfile profile)
