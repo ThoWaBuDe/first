@@ -20,6 +20,7 @@
 #include <QTextStream>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -61,19 +62,125 @@ static void sendError(int id, int code, const QString &message)
                   {"error",QJsonObject{{"code",code},{"message",message}}}});
 }
 
+// ─── Konfiguration ────────────────────────────────────────────────────────────
+// Zwei Root-Verzeichnisse:
+//   LLAMAQT_SANDBOX  — Projektdateien des Modells  (Standard: ~/llamatools)
+//   LLAMAQT_SOURCES  — LlamaQt Quellcode selbst    (Standard: ~/ai/LlamaQT)
+//
+// Relative Pfade werden gegen BEIDE Roots geprüft — die erste die existiert
+// gewinnt. Absolute Pfade werden direkt verwendet.
+static QString g_sandboxRoot;
+static QString g_sourcesRoot;
+
+static void initRoots()
+{
+    g_sandboxRoot = qEnvironmentVariable("LLAMAQT_SANDBOX");
+    if (g_sandboxRoot.isEmpty())
+        g_sandboxRoot = QDir::homePath() + "/llamatools";
+    while (g_sandboxRoot.endsWith('/')) g_sandboxRoot.chop(1);
+
+    g_sourcesRoot = qEnvironmentVariable("LLAMAQT_SOURCES");
+    if (g_sourcesRoot.isEmpty())
+        g_sourcesRoot = QDir::homePath() + "/ai/LlamaQT";
+    while (g_sourcesRoot.endsWith('/')) g_sourcesRoot.chop(1);
+}
+
+// Löst einen Pfad auf:
+//   absolut  → direkt verwenden (QFile::exists prüft ob er gültig ist)
+//   relativ  → zuerst in Sandbox suchen, dann in Sources, dann Sandbox als Fallback
+//
+// Dadurch funktionieren beide Konventionen:
+//   "LlamaQT/src/Agent.h"              → Sandbox-Root
+//   "src/Agent.h"                       → Sources-Root (kein LlamaQT/ Prefix)
+//   "/home/thomas/ai/LlamaQT/src/Agent.h" → absolut, direkt
+static QString resolvePath(const QString &path)
+{
+    if (path.startsWith('/'))
+        return path;   // absolut → unverändert
+
+    // Relativ: beide Roots ausprobieren, erste existierende gewinnt
+    QString inSandbox = g_sandboxRoot + '/' + path;
+    if (QFile::exists(inSandbox))
+        return inSandbox;
+
+    QString inSources = g_sourcesRoot + '/' + path;
+    if (QFile::exists(inSources))
+        return inSources;
+
+    // Nichts gefunden — Sandbox als Fallback (Fehlermeldung kommt von readFile)
+    return inSandbox;
+}
+
 // ─── File utilities ───────────────────────────────────────────────────────────
 
 // Prüft ob der Dateipfad eine erlaubte Extension hat.
 // Wir arbeiten read-only, aber wir wollen keine Binärdateien parsen.
 static bool isAllowedFile(const QString &path)
 {
-    // QFileInfo gibt uns Basename und Suffix getrennt.
     QFileInfo fi(path);
     QString name = fi.fileName();
     QString suf  = fi.suffix().toLower();
 
     if (name == "CMakeLists.txt") return true;
     return (suf == "c" || suf == "cpp" || suf == "h" || suf == "hpp");
+}
+
+// ─── Qt-Macro Neutralisierung (Bug 1) ────────────────────────────────────────
+// Qt-Macros wie Q_OBJECT, signals:, slots: sind kein Standard-C++ —
+// tree-sitter's C++ Grammar kennt sie nicht und erzeugt ERROR-Nodes mitten
+// in der Klassendefinition. Dadurch findet der Parser die Klasse nicht mehr
+// als class_specifier.
+//
+// Strategie: Wir ersetzen die Macros VOR dem Parsen durch gleich lange
+// Leerzeichen-Blöcke. Gleiche Länge = alle Byte-Offsets (Zeilennummern!)
+// bleiben exakt korrekt. Der Baum ist danach syntaktisch sauber.
+//
+// Wichtig: wir ersetzen nur vollständige Tokens (word boundary via Zustandsmaschine),
+// nicht Teilstrings. "Q_OBJECT_FOO" soll nicht angefasst werden.
+static QByteArray neutralizeQtMacros(const QByteArray &src)
+{
+    // Liste der Macros die ersetzt werden.
+    // Sortiert nach Länge (längste zuerst) verhindert Teilersetzungen.
+    static const QList<QByteArray> macros = {
+        "Q_OBJECT",
+        "Q_GADGET",
+        "Q_INTERFACES",
+        "Q_PROPERTY",
+        "Q_INVOKABLE",
+        "Q_REVISION",
+        "Q_SIGNALS",
+        "Q_SLOTS",
+        "Q_ENUMS",
+        "Q_FLAGS",
+        "signals",
+        "slots",
+        "emit",
+    };
+
+    QByteArray result = src;
+
+    for (const QByteArray &macro : macros) {
+        int pos = 0;
+        while ((pos = result.indexOf(macro, pos)) != -1) {
+            // Prüfe ob es ein vollständiges Token ist (kein Bezeichner davor/danach).
+            // Zeichen vor dem Match: muss kein Bezeichner-Zeichen sein
+            bool prevOk = (pos == 0) ||
+                          (!std::isalnum(static_cast<unsigned char>(result[pos-1]))
+                           && result[pos-1] != '_');
+            // Zeichen nach dem Match
+            int after = pos + macro.size();
+            bool nextOk = (after >= result.size()) ||
+                          (!std::isalnum(static_cast<unsigned char>(result[after]))
+                           && result[after] != '_');
+
+            if (prevOk && nextOk) {
+                // Ersetze durch gleich viele Leerzeichen — Offsets bleiben korrekt
+                result.replace(pos, macro.size(), QByteArray(macro.size(), ' '));
+            }
+            pos += macro.size();
+        }
+    }
+    return result;
 }
 
 // Liest die komplette Datei als QByteArray (UTF-8).
@@ -139,9 +246,14 @@ struct ParseResult {
 
 // Parst eine Datei und gibt ParseResult zurück.
 // Bei Fehler ist tree == nullptr und errOut enthält die Fehlermeldung.
-static ParseResult parseFile(const QString &path, QString &errOut)
+// Bug 2: Pfad wird zuerst aufgelöst (relativ → absolut via Sandbox-Root).
+// Bug 1: Qt-Macros werden vor dem Parsen neutralisiert.
+static ParseResult parseFile(const QString &rawPath, QString &errOut)
 {
     ParseResult result;
+
+    // Bug 2: Pfad auflösen
+    QString path = resolvePath(rawPath);
 
     if (!isAllowedFile(path)) {
         errOut = "File type not allowed. Supported: .c .cpp .h .hpp CMakeLists.txt";
@@ -150,6 +262,13 @@ static ParseResult parseFile(const QString &path, QString &errOut)
 
     if (!readFile(path, result.src, errOut))
         return result;
+
+    // Bug 1: Qt-Macros neutralisieren bevor tree-sitter den Source sieht.
+    // Nur für .h/.hpp/.cpp Dateien nötig, nicht für CMake.
+    QFileInfo fi(path);
+    QString suf = fi.suffix().toLower();
+    if (suf == "h" || suf == "hpp" || suf == "cpp" || suf == "c")
+        result.src = neutralizeQtMacros(result.src);
 
     const TSLanguage *lang = languageForFile(path);
     if (!lang) {
@@ -636,42 +755,49 @@ static QJsonArray makeToolList()
         tool("list_symbols",
             "List all top-level symbols (functions, classes, structs, enums, typedefs) "
             "in a C/C++/CMake file with line numbers. "
-            "Supported extensions: .c .cpp .h .hpp CMakeLists.txt",
-            {{"path", prop("string", "Absolute path to the source file")}},
+            "Supported extensions: .c .cpp .h .hpp CMakeLists.txt. "
+            "Path can be absolute (/home/thomas/ai/LlamaQT/src/Agent.h) "
+            "or relative to sandbox root (LlamaQT/src/Agent.h).",
+            {{"path", prop("string", "Absolute or sandbox-relative path to the source file")}},
             {"path"}),
 
         tool("get_function_body",
             "Extract the complete source of a named function from a C/C++ file. "
-            "Returns the function with start and end line numbers.",
-            {{"path",      prop("string", "Absolute path to the source file")},
+            "Returns the function with start and end line numbers. "
+            "Path can be absolute or relative to sandbox root.",
+            {{"path",      prop("string", "Absolute or sandbox-relative path to the source file")},
              {"function",  prop("string", "Exact function name")}},
             {"path","function"}),
 
         tool("get_class_members",
             "List all fields and methods of a class or struct with line numbers and "
             "access specifiers (public/private/protected). "
-            "Works on C++ class and struct definitions.",
-            {{"path",  prop("string", "Absolute path to the source file")},
+            "Works on C++ class and struct definitions. Qt classes (Q_OBJECT) are supported. "
+            "Path can be absolute or relative to sandbox root.",
+            {{"path",  prop("string", "Absolute or sandbox-relative path to the source file")},
              {"class", prop("string", "Exact class or struct name")}},
             {"path","class"}),
 
         tool("get_includes",
-            "List all #include directives in a C/C++ file with line numbers.",
-            {{"path", prop("string", "Absolute path to the source file")}},
+            "List all #include directives in a C/C++ file with line numbers. "
+            "Path can be absolute or relative to sandbox root.",
+            {{"path", prop("string", "Absolute or sandbox-relative path to the source file")}},
             {"path"}),
 
         tool("get_class_hierarchy",
             "Show all classes in a file and their base classes "
             "(inheritance: class Foo : public Bar). "
-            "Useful for understanding class relationships.",
-            {{"path", prop("string", "Absolute path to the source file")}},
+            "Qt classes (Q_OBJECT, signals, slots) are supported. "
+            "Path can be absolute or relative to sandbox root.",
+            {{"path", prop("string", "Absolute or sandbox-relative path to the source file")}},
             {"path"}),
 
         tool("get_call_graph",
             "List all function calls made by a given function (one level deep). "
             "Includes method calls (obj.method), qualified calls (Ns::func) and "
-            "plain calls (func). Returns call site line numbers.",
-            {{"path",     prop("string", "Absolute path to the source file")},
+            "plain calls (func). Returns call site line numbers. "
+            "Path can be absolute or relative to sandbox root.",
+            {{"path",     prop("string", "Absolute or sandbox-relative path to the source file")},
              {"function", prop("string", "Exact function name to analyze")}},
             {"path","function"}),
 
@@ -680,8 +806,9 @@ static QJsonArray makeToolList()
             "Reports ERROR nodes (unexpected tokens) and MISSING nodes "
             "(tokens that tree-sitter had to invent to continue parsing) "
             "with line and column numbers. "
-            "Note: this is a syntax check, not a full compiler check.",
-            {{"path", prop("string", "Absolute path to the source file")}},
+            "Note: this is a syntax check, not a full compiler check. "
+            "Path can be absolute or relative to sandbox root.",
+            {{"path", prop("string", "Absolute or sandbox-relative path to the source file")}},
             {"path"})
     };
 }
@@ -691,9 +818,17 @@ int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
 
+    // Roots einmalig beim Start initialisieren.
+    // Ab jetzt löst resolvePath() relative Pfade korrekt auf.
+    initRoots();
+
+    QTextStream errStream(stderr);
+    errStream << "[llamaqt-treesitter] Sandbox root:  " << g_sandboxRoot << "\n";
+    errStream << "[llamaqt-treesitter] Sources root:  " << g_sourcesRoot << "\n";
+    errStream.flush();
+
     QJsonArray tools = makeToolList();
     QTextStream in(stdin);
-    QTextStream errStream(stderr);
 
     while (!in.atEnd()) {
         QString line = in.readLine().trimmed();
