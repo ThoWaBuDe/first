@@ -31,6 +31,12 @@ public slots:
     void stopGeneration();
     void rebuildSamplers();
 
+    // Wirft alle KV-Cache-Einträge nach dem letzten Checkpoint weg.
+    // Wird vom Agent nach einem Tool-Fehler oder JSON-Repair aufgerufen.
+    // Der Agent muss nichts über KV-Cache-Internals wissen — er ruft nur
+    // diesen Slot auf und der Worker kümmert sich um den Rest.
+    void rollbackToCheckpoint();
+
 signals:
     void tokenGenerated(const QString &token);
     void generationDone(const QString &fullResponse);
@@ -65,6 +71,20 @@ private:
 
     std::atomic<bool> m_stopFlag{false};
     bool m_initialized = false;
+
+    // n_past-Tracking für Delta-Encoding und KV-Cache-Rollback.
+    //
+    // m_nPast:     Anzahl der Tokens die aktuell im KV-Cache stehen.
+    //              Wird nach jedem Prefill und nach jedem generierten Token
+    //              inkrementiert. Entspricht dem "Schreibzeiger" im Cache.
+    //
+    // m_checkpoint: Gespeicherter m_nPast-Wert — gesetzt am Anfang von
+    //              doGenerate(), also vor dem Encode des neuen Prompts.
+    //              rollbackToCheckpoint() stellt diesen Stand wieder her.
+    //              Analogie: wie ein Savestate in einem Emulator — wir können
+    //              genau hierhin zurückspringen wenn etwas schiefläuft.
+    int m_nPast      = 0;
+    int m_checkpoint = 0;
 
     ChatTemplate::Preset m_detectedPreset = ChatTemplate::Preset::ChatML;
 
