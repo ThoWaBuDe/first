@@ -1,0 +1,12 @@
+[submodule "mcp-servers/tree-sitter/vendor/tree-sitter"]
+	path = mcp-servers/tree-sitter/vendor/tree-sitter
+	url = https://github.com/tree-sitter/tree-sitter
+[submodule "mcp-servers/tree-sitter/vendor/tree-sitter-c"]
+	path = mcp-servers/tree-sitter/vendor/tree-sitter-c
+	url = https://github.com/tree-sitter/tree-sitter-c
+[submodule "mcp-servers/tree-sitter/vendor/tree-sitter-cpp"]
+	path = mcp-servers/tree-sitter/vendor/tree-sitter-cpp
+	url = https://github.com/tree-sitter/tree-sitter-cpp
+[submodule "mcp-servers/tree-sitter/vendor/tree-sitter-cmake"]
+	path = mcp-servers/tree-sitter/vendor/tree-sitter-cmake
+	url = https://github.com/uyha/tree-sitter-cmake
