@@ -33,35 +33,37 @@ export TAVILY_API_KEY="tvly-..."
 ./LlamaQt
 ```
 
-## Modell-Pfad
+## Konfiguration
 
-In `src/MainWindow.h`:
-```cpp
-static constexpr const char *MODEL_PATH =
-    "/home/thomas/ai/models/Qwen3.5-9B-Q6_K.gguf";
+Einstellungen unter `Datei → Einstellungen` (Ctrl+,) oder direkt in:
 ```
+~/.config/LlamaQt/LlamaQt.conf
+```
+
+Konfigurierbar: Modellpfad, Sampler-Parameter, Context-Größe,
+Chat-Template, Deadlock-Schwellen, Logging, Tavily API Key.
 
 ## Tool-Sandbox
 
 Das Modell kann nur auf `~/llamatools/` zugreifen.
 Symlinks werden auf jedem Pfad-Level geprüft (kein Sandbox-Escape).
+Absolute Pfade werden abgelehnt.
 
 ```bash
 mkdir ~/llamatools
-echo "Hallo Welt" > ~/llamatools/test.txt
 ```
 
 ## Slash-Kommandos
 
 | Kommando              | Aktion                                              |
 |-----------------------|-----------------------------------------------------|
-| `/init [Projektname]` | Verzeichnis + AGENT.md in Sandbox anlegen           |
-| `/build`              | cmake configure + make                              |
+| `/init [Projektname]` | Verzeichnis + Git-Repo + AGENT.md anlegen           |
+| `/build`              | cmake configure + make (3x Retry)                  |
 | `/compile`            | nur make (kein Re-Configure)                        |
-| `/run`                | cmake (falls nötig) + make + Binary starten         |
-
-Slash-Kommandos erzeugen einen präzisen Prompt der ans LLM geschickt wird.
-Das LLM führt die eigentliche Arbeit via Tools aus.
+| `/run`                | cmake + make + Binary starten                       |
+| `/summarize`          | Konversation manuell zusammenfassen                 |
+| `/undo [Datei]`       | letzten git-commit rückgängig                       |
+| `/diff`               | git diff anzeigen                                   |
 
 ## Eingabe
 
@@ -71,14 +73,16 @@ Das LLM führt die eigentliche Arbeit via Tools aus.
 ## Architektur
 
 ```
-GUI-Thread                      Worker-Thread
-────────────────────────────    ──────────────────────────
-MainWindow (View/MVP)           LlamaWorker (Active Object)
-  └── Agent (Presenter/MVP)       ├── llama_model*
-        ├── ChatModel             ├── llama_context*
-        ├── McpManager            ├── llama_sampler* Chat
-        │     └── McpClient(s)    └── llama_sampler* Tool
-        └── CommandProcessor
+GUI-Thread                          Worker-Thread
+──────────────────────────────────  ──────────────────────────
+MainWindow (View/MVP)               LlamaWorker (Active Object)
+  └── Agent (Presenter/MVP)           ├── llama_model*
+        ├── ChatModel                 ├── llama_context*
+        ├── McpManager                ├── llama_sampler* Chat
+        │     └── McpClient(s)        └── llama_sampler* Tool
+        ├── CommandProcessor
+        ├── ChatLogger
+        └── AppConfig (Singleton)
 
 Signal-Slot (QueuedConnection = thread-sichere Queue):
   tokenGenerated  →  onTokenReceived  →  filterToken
@@ -86,34 +90,51 @@ Signal-Slot (QueuedConnection = thread-sichere Queue):
   modelLoaded     →  onModelLoaded
 
 Patterns:
-  MVP              - MainWindow (View) / Agent (Presenter) / ChatModel (Model)
+  MVP              - MainWindow / Agent / ChatModel
   Active Object    - LlamaWorker im eigenen Thread
   Producer/Consumer- Token-Streaming via Signals
   Command          - CommandProcessor (Slash-Kommandos)
   Facade           - McpManager über mehrere McpClients
   State Machine    - filterToken (<think>...</think>)
   Generation Stamp - Session-ID für sicheres onStop()
+  Singleton        - AppConfig
+  Observer         - ChatLogger, EditorDock/QFileSystemWatcher
 ```
 
 ## MCP-Server
 
-| Server       | Tools                                        |
-|--------------|----------------------------------------------|
-| filesystem   | read_file, write_file, append_file, str_replace, list_dir, list_symbols, mkdir |
-| sysinfo      | get_time, get_pwd, disk_free, sys_info       |
-| compile      | cmake_build, pkg_status, check_run           |
-| websearch    | web_search                                   |
+| Server     | Version | Tools                                                      |
+|------------|---------|------------------------------------------------------------|
+| filesystem | v2.3    | read/write/append/str_replace/patch, list_dir, list_symbols|
+|            |         | mkdir, grep_code, search_code, tree, find_files            |
+|            |         | read_multiple_files, move_file, copy_file                  |
+|            |         | git_status/diff/log/checkout                               |
+| sysinfo    | v2.0    | get_time, get_pwd, disk_free, sys_info                     |
+|            |         | gpu_info, set_power_limit                                  |
+| compile    | v2.0    | cmake_build (3x Retry), pkg_status, check_run              |
+| websearch  | v1.1    | web_search (Tavily API)                                    |
 
 ## Sampler-Profile
 
-| Profil | Top-K | Temp | Top-P | Verwendung               |
-|--------|-------|------|-------|--------------------------|
-| Chat   | 40    | 0.7  | 0.95  | Normale Konversation     |
-| Tool   | 20    | 0.1  | 0.50  | Tool-Calls, nach Tools   |
+| Profil | Top-K | Temp | Top-P | Min-P | Seed         |
+|--------|-------|------|-------|-------|--------------|
+| Chat   | 40    | 0.7  | 0.95  | 0.05  | /dev/urandom |
+| Tool   | 20    | 0.1  | 0.50  | 0.05  | /dev/urandom |
+
+Seed wird vor **jeder** Generation neu gezogen — kein deterministischer Loop.
+
+## KV-Cache
+
+```cpp
+ctxParams.type_k = GGML_TYPE_Q8_0;
+ctxParams.type_v = GGML_TYPE_Q8_0;
+ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+```
+
+Qwen3.5 hat hybride Architektur (Transformer + Recurrent/SSM-Layer).
+Recurrent-Layer brauchen keinen KV-Cache → reduzierter VRAM-Verbrauch.
 
 ## Deadlock-Erkennung
-
-Wenn dasselbe Tool wiederholt mit demselben Fehler scheitert:
 
 | Fehlerzahl | Eskalation                                    |
 |------------|-----------------------------------------------|
@@ -121,13 +142,14 @@ Wenn dasselbe Tool wiederholt mit demselben Fehler scheitert:
 | 5          | Umleitung — anderen Weg suchen                |
 | 7          | Abbruch — LLM erklärt dem Nutzer den Fehler   |
 
-## Stop-Mechanismus
+## Code-Editor
 
-`onStop()` inkrementiert eine Session-ID. Alle laufenden MCP-Callbacks
-und Continuations prüfen ihre gespeicherte ID — veraltete werden verworfen.
-Das verhindert dass Continuations nach dem Stop weiterlaufen.
+EditorDock: andockbares Fenster mit C++ Syntax-Highlighting.
+- Öffnet Dateien aus der Sandbox direkt im UI
+- Erkennt externe Änderungen durch das Modell (`!` im Tab-Titel)
+- Informiert das Modell bei manuellem Speichern automatisch
 
-## Projektgedächtnis für Claude
+## Chat-Logging
 
-`AGENT.md` im Projektverzeichnis enthält Architektur, Konventionen und
-aktuellen Stand — analog zu Claude Code. Claude liest es am Sessionbeginn.
+Konversation wird in `~/llamatools/chat_log/` als Markdown gespeichert.
+Aktivierbar in Einstellungen → Logging.

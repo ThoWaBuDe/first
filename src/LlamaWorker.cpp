@@ -149,6 +149,8 @@ void LlamaWorker::initialize(const QString &modelPath)
     ctxParams.n_batch         = cfg.batchSize();
     ctxParams.n_ubatch        = cfg.batchSize();
     ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
+    ctxParams.type_k = GGML_TYPE_Q8_0;
+    ctxParams.type_v = GGML_TYPE_Q8_0;
 
     m_ctx = llama_init_from_model(AS_MODEL(m_model), ctxParams);
     if (!m_ctx) {
