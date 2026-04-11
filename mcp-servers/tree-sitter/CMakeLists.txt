@@ -20,14 +20,9 @@ set_target_properties(tree-sitter-core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
-# ── C grammar ─────────────────────────────────────────────────────────────────
-add_library(tree-sitter-c STATIC
-    vendor/tree-sitter-c/src/parser.c
-)
-target_include_directories(tree-sitter-c PUBLIC
-    vendor/tree-sitter/lib/include
-)
-set_target_properties(tree-sitter-c PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
+# ── C grammar wird nicht benötigt ────────────────────────────────────────────
+# C ist ein Subset von C++ — der C++ Parser versteht beides.
+# tree-sitter-c wird nicht kompiliert und nicht gelinkt.
 
 # ── Shim für tree_sitter/alloc.h ──────────────────────────────────────────────
 # scanner.c der Grammars macht #include <tree_sitter/alloc.h> etc.
@@ -91,12 +86,12 @@ add_executable(llamaqt-treesitter main.cpp)
 
 target_include_directories(llamaqt-treesitter PRIVATE
     vendor/tree-sitter/lib/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../common   # McpServer.h + PathPolicy.h
 )
 
 target_link_libraries(llamaqt-treesitter PRIVATE
     Qt6::Core
     tree-sitter-core
-    tree-sitter-c
     tree-sitter-cpp
     tree-sitter-cmake
 )
