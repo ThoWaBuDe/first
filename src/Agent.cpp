@@ -65,6 +65,7 @@ void Agent::start()
     m_mcp.addServer(binDir + "/mcp-servers/compile/llamaqt-compile");
     m_mcp.addServer(binDir + "/mcp-servers/websearch/llamaqt-websearch");
     m_mcp.addServer(binDir + "/mcp-servers/tree-sitter/llamaqt-treesitter");
+    m_mcp.addServer(binDir + "/mcp-servers/clang/llamaqt-clang");
 
     m_mcp.startAll([this](bool ok, QStringList errors) {
         if (!ok)
