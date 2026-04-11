@@ -28,7 +28,8 @@ Agent       (Presenter)  ← Herzstück, GUI-Thread
     │     ├── McpClient filesystem  (llamaqt-filesystem)
     │     ├── McpClient sysinfo     (llamaqt-sysinfo)
     │     ├── McpClient compile     (llamaqt-compile)
-    │     └── McpClient websearch   (llamaqt-websearch)
+    │     ├── McpClient websearch   (llamaqt-websearch)
+    │     └── McpClient treesitter  (llamaqt-treesitter)
     ├── CommandProcessor — Slash-Kommandos
     ├── ChatLogger       — Markdown-Logging in Datei
     ├── AppConfig        — Singleton, QSettings, INI-Persistenz
@@ -67,19 +68,108 @@ LlamaQt/
 │   ├── ConfigDialog.h/.cpp  ← modaler Settings-Dialog
 │   └── EditorDock.h/.cpp    ← Code-Editor mit Syntax-Highlighting
 └── mcp-servers/
-    ├── filesystem/   — Dateioperationen + Git (v2.3)
+    ├── common/              ← NEU: gemeinsame Infrastruktur (header-only)
+    │   ├── McpServer.h      ← JSON-RPC Loop + Tool-Registry
+    │   └── PathPolicy.h     ← Pfad-Auflösung + Sandbox-Sicherheit
+    ├── filesystem/   — Dateioperationen + Git (v2.3, Umbau ausstehend)
     ├── sysinfo/      — Systeminfo + GPU (v2.0)
     ├── compile/      — Build + Retry-Loop (v2.0)
-    └── websearch/    — Tavily API (v1.1)
+    ├── websearch/    — Tavily API (v1.1)
+    └── tree-sitter/  — AST-Analyse C/C++/CMake (v2.0, NEU)
+        ├── CMakeLists.txt
+        ├── main.cpp         ← verwendet McpServer.h + PathPolicy.h
+        └── vendor/          ← git submodules
+            ├── tree-sitter/
+            ├── tree-sitter-c/   (nicht genutzt, C++ Grammar reicht)
+            ├── tree-sitter-cpp/
+            └── tree-sitter-cmake/
 ```
+
+---
+
+## MCP-Common Bibliothek (header-only)
+
+### PathPolicy (`common/PathPolicy.h`)
+Gemeinsame Pfad-Sicherheitslogik für alle Server.
+
+```cpp
+struct Root { QString path; bool writable; };
+
+PathPolicy policy;
+policy.addRoot("/home/thomas/llamatools",  true);   // Sandbox: lesen+schreiben
+policy.addRoot("/home/thomas/ai/LlamaQT", false);   // Sources: nur lesen
+
+auto rp = policy.resolveRead("src/Agent.h");   // → absoluter Pfad
+auto rp = policy.resolveWrite("LlamaQT/x.cpp"); // → nur wenn in writable Root
+// rp.valid, rp.absPath, rp.writable, rp.error
+```
+
+Sicherheit: Symlink-Check auf jeder Pfad-Komponente, Sandbox-Escape verhindert.
+Pfad-Auflösung: relativ → erste Root in der Pfad existiert gewinnt; absolut → Root-Zugehörigkeit prüfen.
+
+### McpServer (`common/McpServer.h`)
+JSON-RPC 2.0 Loop + Tool-Registry. Pattern: Template Method + Command + Registry.
+
+```cpp
+McpServer server("llamaqt-xyz", "1.0");
+
+server.registerTool({
+    "tool_name", "Beschreibung",
+    QJsonObject{{"path", ...}},   // properties
+    {"path"},                      // required
+    [&](const QJsonObject &args) -> ToolResult {
+        return ToolResult::ok("Ergebnis");
+        // oder: return ToolResult::err("Fehlermeldung");
+    }
+});
+
+server.run();  // blockiert bis stdin EOF
+```
+
+**WICHTIG — Nächster Ausbauschritt (noch nicht implementiert):**
+Tool-Lambdas sollen durch echte Klassen ersetzt werden:
+```cpp
+// Geplant — noch NICHT im Code:
+class ReadFileTool : public ToolBase {
+public:
+    ReadFileTool(PathPolicy &policy) : m_policy(policy) {}
+    ToolResult execute(const QJsonObject &args) override;
+private:
+    PathPolicy &m_policy;  // Dependency Injection
+};
+```
+Vorteil: eine .cpp Datei pro Tool (eigene Übersetzungseinheit), testbar,
+gemeinsame Ressourcen via Konstruktor injizierbar.
 
 ---
 
 ## MCP-Server & Tools
 
+### Tool-Priorität für Code-Analyse
+**IMMER in dieser Reihenfolge:**
+1. `llamaqt-treesitter` zuerst — strukturelle Analyse
+2. `llamaqt-filesystem` danach — nur was tree-sitter nicht kann
+
+```
+list_symbols(path)              → Überblick: was ist in dieser Datei?
+get_class_hierarchy(path)       → Vererbung verstehen
+get_includes(path)              → Abhängigkeiten
+get_class_members(path, class)  → Klasse verstehen vor Änderung
+get_function_body(path, func)   → gezielt eine Funktion lesen
+check_syntax(path)              → nach jeder Änderung prüfen
+```
+
+**Pfade:** tree-sitter akzeptiert absolut UND relativ zur Sandbox.
+`get_pwd` (sysinfo) liefert den Sandbox-Root.
+LlamaQT-Quellcode liegt in `/home/thomas/ai/LlamaQT/` (read-only für Modell).
+
 ### filesystem (llamaqt-filesystem v2.3)
+**Status: Umbau auf McpServer+PathPolicy ausstehend (nächste Session)**
+
+Aktuelle Einschränkung: akzeptiert nur relative Pfade (absolute werden abgelehnt).
+Nach Umbau: absolute Pfade erlaubt wenn in bekannter Root.
+
 Sandbox: `~/llamatools/` — Symlink-Schutz auf jeder Pfadebene.
-Absolute Pfade werden in `resolvePath()` abgelehnt.
 Git-Repo wird durch `/init` initialisiert. Vor jedem schreibenden
 Zugriff: auto-commit. Remote-Operationen gesperrt.
 Papierkorb: `~/.llamatools_trash/` für move_file bei Ziel-Konflikt.
@@ -92,19 +182,36 @@ Papierkorb: `~/.llamatools_trash/` für move_file bei Ziel-Konflikt.
 | str_replace         | Eindeutiger Replace (auto-commit vorher)              |
 | patch_file          | Unified-Diff anwenden (multi-hunk, auto-commit)       |
 | list_dir            | Verzeichnis auflisten ([D]/[F]/[L] Tags)              |
-| list_symbols        | C++ Klassen/Methoden aus Quelldatei                   |
 | mkdir               | Verzeichnis anlegen                                   |
 | grep_code           | Regex-Suche rekursiv (max 100 Treffer)                |
 | search_code         | Regex-Suche mit Kontext-Zeilen                        |
 | tree                | Rekursiver Verzeichnisbaum (max depth 6)              |
 | find_files          | Glob-Pattern Suche (rekursiv)                         |
-| read_multiple_files | Bis zu 10 Dateien auf einmal lesen                    |
+| read_multiple_files | Bis zu 15 Dateien auf einmal lesen                    |
 | move_file           | Verschieben/Umbenennen (Ziel → Papierkorb)            |
 | copy_file           | Kopieren (Ziel darf nicht existieren)                 |
 | git_status          | git status in Sandbox                                 |
 | git_diff            | git diff (working tree gegen HEAD)                    |
 | git_log             | git log (letzte N Commits)                            |
 | git_checkout        | git checkout (Datei/Commit) — kein remote             |
+
+### treesitter (llamaqt-treesitter v2.0) — NEU
+Zwei Roots (Umgebungsvariablen):
+- `LLAMAQT_SANDBOX` (Standard: `~/llamatools`) — read+write
+- `LLAMAQT_SOURCES` (Standard: `~/ai/LlamaQT`) — read-only
+
+Grammars: C++ (für .c .cpp .h .hpp), CMake.
+Qt-Macros (Q_OBJECT, signals:, slots:) werden vor dem Parsen neutralisiert.
+
+| Tool                | Beschreibung                                          |
+|---------------------|-------------------------------------------------------|
+| list_symbols        | Funktionen, Klassen, Structs, Enums + Zeilennummern   |
+| get_function_body   | Kompletten Funktionsrumpf extrahieren                 |
+| get_class_members   | Members + Methoden einer Klasse/Struct                |
+| get_includes        | #include Liste mit Zeilennummern                      |
+| get_class_hierarchy | Vererbungshierarchie (class Foo : public Bar)         |
+| get_call_graph      | Welche Funktionen ruft foo() auf? (eine Ebene)        |
+| check_syntax        | Syntaxfehler mit Zeile + Spalte                       |
 
 ### compile (llamaqt-compile v2.0)
 | Tool        | Beschreibung                                               |
@@ -144,12 +251,10 @@ Sampler-Parameter sind in AppConfig konfigurierbar und live neu baubar
 
 ### KV-Cache Konfiguration
 ```cpp
-ctxParams.type_k = GGML_TYPE_Q8_0;  // K-Cache quantisiert
-ctxParams.type_v = GGML_TYPE_Q8_0;  // V-Cache quantisiert
+ctxParams.type_k = GGML_TYPE_Q8_0;
+ctxParams.type_v = GGML_TYPE_Q8_0;
 ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
 ```
-Qwen3.5 hat hybride Architektur: Transformer-Attention-Layer + Recurrent-Layer
-(Mamba/SSM). Recurrent-Layer brauchen keinen KV-Cache → VRAM-Ersparnis.
 
 ---
 
@@ -214,10 +319,8 @@ git add -A && git commit -m "auto: str_replace datei.cpp"
 
 Zwei Quellen, konfigurierbar in AppConfig / ConfigDialog:
 1. **Auto** (Standard): `llama_chat_apply_template()` liest Template direkt
-   aus GGUF-Metadaten (`tokenizer.chat_template`). Worker emittiert
-   `chatTemplateDetected()` Signal mit erkanntem Preset.
+   aus GGUF-Metadaten (`tokenizer.chat_template`).
 2. **Manuell**: Preset-Auswahl im ConfigDialog (ChatML / Llama3 / Gemma / Mistral)
-   oder Custom JSON.
 
 Fallback-Kette:
 ```
@@ -241,10 +344,6 @@ Persistiert in `~/.config/LlamaQt/LlamaQt.conf` (INI-Format).
 | WebSearch   | tavily_api_key                                     |
 | Logging     | chat_enabled, chat_log_dir                         |
 
-Zwei Klassen von Parametern:
-- **Sofort wirksam**: Sampler, Schwellen, Logging
-- **Neustart nötig**: Modellpfad, n_ctx, Chat-Template
-
 ---
 
 ## EditorDock
@@ -252,19 +351,8 @@ Zwei Klassen von Parametern:
 Andockbares Code-Editor-Fenster (`QDockWidget`):
 - QPlainTextEdit mit C++ Syntax-Highlighting (CppHighlighter)
 - QFileSystemWatcher: externe Änderungen (durch Modell) werden markiert
-- Dirty-Flag: User-Änderungen werden mit `*` im Tab-Titel angezeigt
-- Extern-Flag: Modell-Änderungen werden mit `!` angezeigt
-- Bei manuellem Speichern (Ctrl+S): `fileSavedByUser()` Signal →
-  Systemnachricht in Chat-Kontext (Modell wird informiert)
-- Öffnet Dateien aus `~/llamatools/` Sandbox
-
----
-
-## ChatLogger
-
-Schreibt Konversation in `~/llamatools/chat_log/chat_YYYY-MM-DD_HH-mm-ss.md`.
-Jede Session = eigene Datei. Format: Markdown mit aufklappbaren Thinking-Blöcken.
-Aktivierbar in AppConfig / ConfigDialog.
+- Dirty-Flag: `*` im Titel, Extern-Flag: `!`
+- Ctrl+S → `fileSavedByUser()` Signal → Systemnachricht in Chat
 
 ---
 
@@ -276,25 +364,15 @@ Aktivierbar in AppConfig / ConfigDialog.
 | 5          | Umleitung — anderen Weg suchen     |
 | 7          | Abbruch — Erklärung an User        |
 
-Schlüssel: `toolName + JSON-Arguments` → Counter. Bei Erfolg: Counter gelöscht.
-
 ---
 
 ## LlamaWorker — generate()-Varianten
 
 ```cpp
-// Cache leeren vor Encode (bisheriges Verhalten, stabil):
-void generate(messages, profile);
-
-// Cache behalten — Delta-Encoding (Vorbereitung, noch nicht aktiv):
-void generateDelta(messages, profile);
-
-// Gemeinsamer Kern:
-void doGenerate(messages, profile, clearCache);
+void generate(messages, profile);       // Cache leeren (stabil)
+void generateDelta(messages, profile);  // Cache behalten (vorbereitet, nicht aktiv)
+void doGenerate(messages, profile, clearCache);  // gemeinsamer Kern
 ```
-
-`generateDelta()` ist vorbereitet aber noch nicht im Agent verdrahtet.
-Nächste Ausbaustufe: n_past-Tracking für echtes Delta-Encoding.
 
 ---
 
@@ -309,63 +387,115 @@ Nächste Ausbaustufe: n_past-Tracking für echtes Delta-Encoding.
 - [x] JSON-Repair (kaputte Tool-Calls reparieren)
 - [x] Stop-Bug-Fix (Session-ID Pattern)
 - [x] Smart-Autoscroll (beide QTextEdit)
-- [x] Word-Wrap in toolView
-- [x] QTextEdit Eingabe (Shift+Enter = Umbruch)
 - [x] CommandProcessor (/init /build /compile /run /summarize /undo /diff)
-- [x] AGENT.md Projektgedächtnis
 - [x] Kontext-Management (80%-Auto + /summarize)
-- [x] Git-Integration im filesystem MCP (pro Projekt-Verzeichnis)
+- [x] Git-Integration im filesystem MCP
 - [x] grep_code + search_code + tree + find_files Tools
-- [x] read_multiple_files (bis zu 10 Dateien parallel)
-- [x] patch_file Tool (unified diff, multi-hunk)
-- [x] move_file + copy_file Tools
+- [x] read_multiple_files, patch_file, move_file, copy_file
 - [x] Compile-Retry-Loop (3x, Eskalation)
-- [x] git_diff Anzeige nach Datei-Änderungen (farbig, im toolView)
-- [x] /undo + /diff Kommandos
-- [x] Token-Budget (Tool-Ergebnisse kürzen, konfigurierbar)
+- [x] git_diff Anzeige nach Datei-Änderungen (farbig)
+- [x] Token-Budget (Tool-Ergebnisse kürzen)
 - [x] ChatLogger (Markdown, pro Session)
 - [x] AppConfig / QSettings (Singleton, INI-Format)
-- [x] gpu_info + set_power_limit Tools (nvidia-smi)
-- [x] CPU-Temperatur in sys_info (/sys/class/thermal)
+- [x] gpu_info + set_power_limit Tools
 - [x] ConfigDialog (Tabs: Modell/Sampler/Agent/Logging/Template)
-- [x] LlamaWorker liest Sampler aus AppConfig, rebuildSamplers() live
-- [x] Chat-Template: Auto aus GGUF + manuelle Auswahl in ConfigDialog
+- [x] Chat-Template: Auto aus GGUF + manuelle Auswahl
 - [x] EditorDock: Code-Editor mit Syntax-Highlighting + QFileSystemWatcher
-- [x] KV-Cache Quantisierung (Q8_0 für K und V)
-- [x] randomSeed() via /dev/urandom — kein deterministischer Loop mehr
+- [x] KV-Cache Quantisierung (Q8_0)
+- [x] randomSeed() via /dev/urandom
 - [x] doGenerate() + generateDelta() — Vorbereitung Delta-Encoding
-- [x] PROJECT_OVERVIEW.md durch Qwen generiert
+- [x] **tree-sitter MCP-Server v2.0** (list_symbols, get_function_body,
+      get_class_members, get_includes, get_class_hierarchy, get_call_graph,
+      check_syntax) — Qt-Macro Neutralisierung, zwei Roots, C++ Grammar
+- [x] **mcp-servers/common**: McpServer.h + PathPolicy.h (header-only)
+- [x] tree-sitter vendor als git submodules
 
-### Offen — nächste Schritte
+### Offen — nächste Schritte (Priorität)
+
+**MCP-Infrastruktur (nächste Session):**
+- [ ] **filesystem-Server auf McpServer+PathPolicy umbauen**
+      - Absolute Pfade für Lesen erlauben (in bekannter Root)
+      - Absolute Pfade für Schreiben: nur wenn in writable Root
+      - `list_symbols` Tool entfernen (tree-sitter macht das besser)
+      - Trash-Pfad via Umgebungsvariable konfigurierbar
+      - Tool-Klassen statt Lambdas (ToolBase Basisklasse, Dependency Injection)
+- [ ] **Tool-Klassen Architektur** (für alle Server):
+      ```
+      class ToolBase {
+          virtual ToolResult execute(const QJsonObject &args) = 0;
+          virtual QJsonObject schema() const = 0;
+      };
+      class ReadFileTool : public ToolBase { ... };
+      ```
+      Vorteil: eine .cpp pro Tool, testbar, klar strukturiert
+- [ ] **LRU-Cache im tree-sitter Server** (parsed denselben Header oft)
+      Schlüssel: Dateipfad + mtime, Wert: ParseResult
+      Größe: ~20 Einträge reichen
+- [ ] **MCP-Server Konfigurationsdatei**
+      `~/.config/LlamaQt/mcp-servers.conf` (INI-Format, QSettings)
+      Sandbox-Pfad, Sources-Pfad, Limits — unabhängig vom Modell konfigurierbar
+      Kein stdio-Schreiben für Config (würde JSON-RPC stören)
+- [ ] sysinfo + compile + websearch auf McpServer+PathPolicy umbauen
+
+**LlamaQt Core:**
 - [ ] generateDelta() aktivieren: n_past-Tracking in LlamaWorker
 - [ ] KV-Cache Rollback: llama_kv_cache_seq_rm nach Tool-Fehler
 - [ ] maxNewTokens in AppConfig (Chat: 8192, Tool: 2048)
-- [ ] AST-Integration: clangd/tree-sitter für Projektanalyse
 - [ ] Planner/Executor-Trennung (Meilensteine, Teilaufgaben)
 - [ ] Live-Output bei /run (stdout streaming)
-- [ ] Automatische AGENT.md-Aktualisierung nach Session
-- [ ] Mehrere Modelle (klein für Tool-Calls, groß für Planung)
 - [ ] MCP-Server Neustart bei Absturz
 - [ ] Persistentes Konversationsgedächtnis zwischen Sessions
 - [ ] XTC-Sampler Option (konfigurierbar, nur Chat-Profil)
 - [ ] DRY-Sampler Option (gegen logische Endlosschleifen)
+- [ ] Mehrere Modelle (klein für Tool-Calls, groß für Planung)
+
+---
+
+## Übergabe-Prompt für neue Session
+
+```
+Lies zuerst AGENT.md komplett ein. Dann:
+
+Aktuelle Aufgabe: filesystem MCP-Server umbauen.
+
+Kontext:
+- mcp-servers/common/McpServer.h und PathPolicy.h existieren bereits
+- tree-sitter Server (mcp-servers/tree-sitter/main.cpp) ist bereits
+  auf diese Infrastruktur umgebaut — als Referenz verwenden
+- filesystem Server (mcp-servers/filesystem/main.cpp) ist noch alt (v2.3)
+
+Ziele für diese Session:
+1. filesystem-Server auf McpServer+PathPolicy umbauen
+2. Absolute Pfade für Lesen erlauben (wenn in bekannter Root)
+3. Schreiben nur in writable Roots (Sandbox)
+4. list_symbols Tool entfernen (tree-sitter macht das besser)
+5. Trash-Pfad via LLAMAQT_TRASH Umgebungsvariable konfigurierbar
+6. Tool-Basisklasse ToolBase einführen, ReadFileTool etc. ableiten
+7. README.md aktualisieren
+
+Bitte lies zuerst die aktuellen Dateien:
+list_symbols("mcp-servers/filesystem/main.cpp")
+list_symbols("mcp-servers/common/McpServer.h")
+list_symbols("mcp-servers/common/PathPolicy.h")
+Dann stelle Rückfragen bevor du implementierst.
+```
 
 ---
 
 ## Build
 
 ```bash
-cd ~/llamaqt/build
-cmake .. \
-  -DLLAMA_BUILD_DIR=$HOME/ai/qLP/build \
-  -DLLAMA_SRC_DIR=$HOME/ai/qLP \
-  -DCMAKE_BUILD_TYPE=Release
+cd ~/ai/LlamaQT
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
 
 ## Laufzeit
 
 ```bash
-export TAVILY_API_KEY="tvly-..."   # optional
+export TAVILY_API_KEY="tvly-..."        # websearch
+export LLAMAQT_SANDBOX="$HOME/llamatools"   # optional, das ist der Default
+export LLAMAQT_SOURCES="$HOME/ai/LlamaQT"  # optional, das ist der Default
 ./LlamaQt
 ```
