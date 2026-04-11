@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.16)
 project(LlamaMcpCompile)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_AUTOMOC ON)
+
 find_package(Qt6 REQUIRED COMPONENTS Core)
+
 add_executable(llamaqt-compile main.cpp)
+
+target_include_directories(llamaqt-compile PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../common
+)
+
 target_link_libraries(llamaqt-compile PRIVATE Qt6::Core)
