@@ -2,70 +2,55 @@
 // ─── McpServer ────────────────────────────────────────────────────────────────
 // Gemeinsamer JSON-RPC 2.0 Loop und Tool-Registry für alle LlamaQt MCP-Server.
 //
-// Pattern: Template Method + Command + Registry
+// Include-Hierarchie (azyklisch):
+//   ToolResult.h  ←  ToolBase.h  ←  McpServer.h
 //
-//   Template Method: run() definiert den Ablauf (lesen → dispatchen → schreiben).
-//                    Der konkrete Server füllt nur die Tools.
+// McpServer.h inkludiert ToolBase.h direkt — das ist sicher weil ToolBase.h
+// nicht mehr McpServer.h inkludiert (ToolResult ist in ToolResult.h).
 //
-//   Command:         Jedes Tool ist ein Tool-Struct mit name/description/
-//                    inputSchema/execute. execute() ist ein std::function —
-//                    damit kann man Lambdas, freie Funktionen oder Member-
-//                    Funktionen anbinden.
+// Warum std::unordered_map statt QHash für unique_ptr?
+//   QHash ist copy-on-write (CoW): intern kann Qt die Map kopieren wenn
+//   man per [] liest. Das erfordert dass der Value-Typ kopierbar ist.
+//   unique_ptr ist absichtlich NICHT kopierbar (deleted copy constructor).
+//   std::unordered_map hat kein CoW — move-only Types sind erlaubt.
+//   emplace() mit std::move() funktioniert korrekt.
 //
-//   Registry:        registerTool() trägt Tools in eine QHash ein.
-//                    Der Dispatch in run() ist dann O(1).
+// Key-Typ: std::string statt QString — std::unordered_map braucht std::hash,
+// der für std::string eingebaut ist, nicht für QString.
+// Konvertierung: QString::toStdString() / QString::fromStdString().
 //
-// Verwendung:
-//
-//   McpServer server("llamaqt-filesystem", "2.3");
-//
-//   server.registerTool({
-//       "read_file",
-//       "Liest eine Datei...",
-//       QJsonObject{ {"path", ...} },          // inputSchema
-//       {"path"},                               // required fields
-//       [&](const QJsonObject &args) -> ToolResult {
-//           // ... Implementierung
-//           return ToolResult::ok("Inhalt...");
-//       }
-//   });
-//
-//   server.run();   // blockiert bis stdin geschlossen wird
+// McpServer.h ist header-only — kein McpServer.cpp mehr nötig.
+// run() ist inline implementiert (langer Code, aber nur einmal kompiliert
+// da McpServer.h via #pragma once nur einmal pro TU eingebunden wird).
+
+#include "ToolResult.h"
+#include "ToolBase.h"
 
 #include <QString>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonDocument>
-#include <QHash>
+#include <QJsonParseError>
 #include <QVector>
 #include <QTextStream>
+#include <QHash>
+
 #include <functional>
+#include <memory>
+#include <unordered_map>
 #include <iostream>
 
-// ─── ToolResult ───────────────────────────────────────────────────────────────
-// Rückgabetyp für Tool-Implementierungen.
-// Trennt "was ist das Ergebnis" von "wie wird es serialisiert".
-struct ToolResult {
-    QString text;
-    bool    isError = false;
-
-    // Factory-Methoden — lesbarer als Konstruktor mit bool-Parameter
-    static ToolResult ok(const QString &text)    { return {text, false}; }
-    static ToolResult err(const QString &text)   { return {text, true};  }
-};
-
-// ─── Tool ─────────────────────────────────────────────────────────────────────
-// Command-Pattern: ein Tool = ein Wert-Objekt.
-// execute bekommt die JSON-Argumente und gibt ein ToolResult zurück.
+// ─── Tool-Struct ──────────────────────────────────────────────────────────────
+// Bleibt für Lambda-basierte Server (z.B. tree-sitter) erhalten.
+// QHash<QString, Tool> ist ok — Tool enthält kein unique_ptr, ist kopierbar.
 struct Tool {
     QString     name;
     QString     description;
-    QJsonObject properties;   // JSON Schema properties
-    QJsonArray  required;     // required field names
+    QJsonObject properties;
+    QJsonArray  required;
 
     std::function<ToolResult(const QJsonObject &args)> execute;
 
-    // JSON Schema für tools/list Antwort
     QJsonObject toSchema() const
     {
         return QJsonObject{
@@ -88,15 +73,26 @@ public:
         : m_name(name), m_version(version)
     {}
 
-    // Tool registrieren. Reihenfolge bestimmt die Reihenfolge in tools/list.
+    // ToolBase-Klasse registrieren (bevorzugt).
+    // Server übernimmt Ownership via unique_ptr.
+    void registerTool(std::unique_ptr<ToolBase> tool)
+    {
+        QString toolName = tool->name();
+        m_toolOrder.append(toolName);
+        // emplace() mit rvalue — kein Kopieren, nur verschieben.
+        // Analogie (AVR): wie DMA-Transfer, kein Byte-für-Byte-Kopieren.
+        m_tools.emplace(toolName.toStdString(), std::move(tool));
+    }
+
+    // Tool-Struct registrieren (für Lambda-basierte Server).
     void registerTool(Tool tool)
     {
         m_toolOrder.append(tool.name);
-        m_tools.insert(tool.name, std::move(tool));
+        m_legacyTools.insert(tool.name, std::move(tool));
     }
 
-    // Hauptschleife: liest JSON-RPC von stdin, schreibt Antworten auf stdout.
-    // Blockiert bis stdin EOF.
+    // Hauptschleife: liest JSON-RPC Zeilen von stdin, schreibt auf stdout.
+    // Blockiert bis stdin EOF (= MCP-Client trennt Verbindung).
     void run()
     {
         QTextStream in(stdin);
@@ -139,9 +135,13 @@ public:
 
             if (method == "tools/list") {
                 QJsonArray toolList;
-                for (const QString &name : m_toolOrder)
-                    toolList.append(m_tools[name].toSchema());
-
+                for (const QString &name : m_toolOrder) {
+                    auto it = m_tools.find(name.toStdString());
+                    if (it != m_tools.end())
+                        toolList.append(it->second->toSchema());
+                    else if (m_legacyTools.contains(name))
+                        toolList.append(m_legacyTools[name].toSchema());
+                }
                 sendResponse({
                     {"jsonrpc", "2.0"}, {"id", id},
                     {"result", QJsonObject{{"tools", toolList}}}
@@ -154,16 +154,15 @@ public:
                 QString toolName   = params.value("name").toString();
                 QJsonObject args   = params.value("arguments").toObject();
 
-                if (!m_tools.contains(toolName)) {
+                auto it = m_tools.find(toolName.toStdString());
+                if (it != m_tools.end()) {
+                    sendResult(id, it->second->execute(args));
+                } else if (m_legacyTools.contains(toolName)) {
+                    sendResult(id, m_legacyTools[toolName].execute(args));
+                } else {
                     sendResult(id, ToolResult::err(
                         QString("Error: unknown tool '%1'").arg(toolName)));
-                    continue;
                 }
-
-                // Tool ausführen — execute() ist das Lambda/die Funktion
-                // die beim registerTool() übergeben wurde.
-                ToolResult result = m_tools[toolName].execute(args);
-                sendResult(id, result);
                 continue;
             }
 
@@ -180,10 +179,18 @@ public:
     }
 
 private:
-    QString              m_name;
-    QString              m_version;
-    QHash<QString, Tool> m_tools;
-    QVector<QString>     m_toolOrder;  // Reihenfolge für tools/list
+    QString  m_name;
+    QString  m_version;
+
+    // unordered_map: move-only Values (unique_ptr) sind erlaubt.
+    // std::string als Key: std::hash<std::string> ist eingebaut.
+    std::unordered_map<std::string, std::unique_ptr<ToolBase>> m_tools;
+
+    // QHash für kopierbare Tool-Structs (Lambda-basierte Server).
+    QHash<QString, Tool> m_legacyTools;
+
+    // Reihenfolge für tools/list.
+    QVector<QString> m_toolOrder;
 
     static void sendResponse(const QJsonObject &msg)
     {

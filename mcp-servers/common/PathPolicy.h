@@ -42,16 +42,13 @@ public:
 
     // ── Konstruktion ──────────────────────────────────────────────────────────
 
-    // Leerer Policy — Roots müssen via addRoot() hinzugefügt werden
     PathPolicy() = default;
 
-    // Convenience: eine einzelne Sandbox-Root
     explicit PathPolicy(const QString &sandboxPath)
     {
         addRoot(sandboxPath, true);
     }
 
-    // Roots hinzufügen
     void addRoot(const QString &path, bool writable)
     {
         QString clean = path;
@@ -62,8 +59,6 @@ public:
 
     // ── Pfad-Auflösung ────────────────────────────────────────────────────────
 
-    // Löst einen Pfad auf und prüft Sicherheit.
-    // forWrite = true: Schreibzugriff — nur writable Roots erlaubt.
     ResolvedPath resolve(const QString &path, bool forWrite = false) const
     {
         if (path.isEmpty())
@@ -72,7 +67,6 @@ public:
         QString abs;
 
         if (path.startsWith('/')) {
-            // Absoluter Pfad: direkt verwenden, Root-Zugehörigkeit prüfen
             abs = QFileInfo(path).absoluteFilePath();
 
             const Root *root = rootFor(abs);
@@ -82,21 +76,15 @@ public:
             if (forWrite && !root->writable)
                 return invalid(QString("Error: path is read-only (not in sandbox): %1").arg(path));
         } else {
-            // Relativer Pfad: Roots der Reihe nach ausprobieren
-            // Für Lesezugriff: erste Root in der der Pfad existiert
-            // Für Schreibzugriff: erste *writable* Root in der der Pfad existiert,
-            //                     Fallback: erste writable Root (für neue Dateien)
             abs = resolveRelative(path, forWrite);
             if (abs.isEmpty())
                 return invalid(QString("Error: no suitable root found for: %1").arg(path));
         }
 
-        // Symlink-Check auf jeder Pfad-Komponente
         QString symlinkErr = checkSymlinks(abs);
         if (!symlinkErr.isEmpty())
             return invalid(symlinkErr);
 
-        // Nochmal Root-Check nach Symlink-Auflösung (Paranoia)
         const Root *root = rootFor(abs);
         if (!root)
             return invalid(QString("Error: resolved path escaped all roots: %1").arg(abs));
@@ -107,13 +95,11 @@ public:
         return { abs, root->writable, true, {} };
     }
 
-    // Convenience: nur Lesen
     ResolvedPath resolveRead(const QString &path) const
     {
         return resolve(path, false);
     }
 
-    // Convenience: Schreiben (nur in writable Roots)
     ResolvedPath resolveWrite(const QString &path) const
     {
         return resolve(path, true);
@@ -121,7 +107,6 @@ public:
 
     // ── Abfragen ──────────────────────────────────────────────────────────────
 
-    // Erste writable Root (= primäre Sandbox) — für git, trash etc.
     QString primarySandbox() const
     {
         for (const Root &r : m_roots)
@@ -129,13 +114,11 @@ public:
         return {};
     }
 
-    // Alle Roots zurückgeben (für Logging)
     const QVector<Root> &roots() const { return m_roots; }
 
 private:
     QVector<Root> m_roots;
 
-    // Gibt die Root zurück zu der absPath gehört, oder nullptr
     const Root *rootFor(const QString &absPath) const
     {
         for (const Root &r : m_roots)
@@ -144,13 +127,8 @@ private:
         return nullptr;
     }
 
-    // Relativen Pfad auflösen: durchsucht Roots in Reihenfolge
     QString resolveRelative(const QString &rel, bool forWrite) const
     {
-        // Schreibzugriff: nur writable Roots durchsuchen
-        // Lesezugriff: alle Roots durchsuchen
-
-        // Erst: existierende Datei suchen (in der richtigen Root-Kategorie)
         for (const Root &r : m_roots) {
             if (forWrite && !r.writable) continue;
             QString candidate = r.path + '/' + rel;
@@ -158,18 +136,15 @@ private:
                 return candidate;
         }
 
-        // Für Lesezugriff: auch read-only Roots versuchen wenn nichts gefunden
         if (!forWrite) {
             for (const Root &r : m_roots) {
-                if (r.writable) continue; // schon oben probiert
+                if (r.writable) continue;
                 QString candidate = r.path + '/' + rel;
                 if (QFileInfo::exists(candidate))
                     return candidate;
             }
         }
 
-        // Nichts gefunden: Fallback auf erste passende Root
-        // (für neue Dateien beim Schreiben, oder Fehlermeldung beim Lesen)
         for (const Root &r : m_roots) {
             if (forWrite && !r.writable) continue;
             return r.path + '/' + rel;
@@ -177,9 +152,6 @@ private:
         return {};
     }
 
-    // Symlink-Check: jede Pfad-Komponente prüfen.
-    // Gibt Fehlermeldung zurück wenn ein Symlink gefunden wird, sonst "".
-    // Verhindert: /sandbox/evil -> /etc  (Sandbox-Escape via Symlink)
     static QString checkSymlinks(const QString &absPath)
     {
         QStringList parts = absPath.split('/', Qt::SkipEmptyParts);
