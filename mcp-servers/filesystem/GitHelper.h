@@ -27,7 +27,7 @@
 #include <QFileInfo>
 #include <QProcess>
 #include <QPair>
-#include "PathPolicy.h"
+#include "../common/PathPolicy.h"
 
 class GitHelper
 {

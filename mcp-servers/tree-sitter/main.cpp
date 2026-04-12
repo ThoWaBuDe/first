@@ -1,17 +1,16 @@
-// ─── LlamaQt MCP TreeSitter Server v2.1 ──────────────────────────────────────
-// Umgebaut auf McpServer + PathPolicy + ToolBase (Klassen-basiert).
+// ─── LlamaQt MCP TreeSitter Server v3.0 ──────────────────────────────────────
+// Neu in v3.0:
+//   - GitHelper integriert (für ReplaceSymbolTool — schreibt in Sandbox)
+//   - GetSymbolTool    — Funktionsrumpf/Klasse by name
+//   - ReplaceSymbolTool — chirurgisches Editieren by name
+//   - GetProjectIndexTool — Markdown-Index on-demand
+//   - RebuildIndexTool — Cache explizit neu bauen
+//   - McpConfig statt Umgebungsvariablen (liest INI direkt)
 //
-// Änderungen gegenüber v2.0:
-//   - Tool-Logik vollständig in eigene Klassen ausgelagert (eine .h pro Tool)
-//   - TreeSitterToolBase als gemeinsame Zwischenschicht
-//   - ParseResult + Hilfsfunktionen in TreeSitterToolBase.h
-//   - main() ist reine Verdrahtung — keine Tool-Logik mehr hier
-//   - Zwei Roots via Umgebungsvariablen (wie filesystem-Server)
-//
-// Zwei Roots:
-//   LLAMAQT_SANDBOX  — Projektdateien (Standard: ~/llamatools)     read-only
-//   LLAMAQT_SOURCES  — LlamaQt Quellcode (Standard: ~/ai/LlamaQT) read-only
-// (tree-sitter schreibt nie — beide Roots sind read-only aus Sicht der Tools)
+// Architektur:
+//   - Zwei Roots: Sandbox (read+write für replace_symbol) + Sources (read-only)
+//   - GitHelper lebt in main() auf dem Stack — same lifetime wie server
+//   - McpConfig liest ~/.config/LlamaQt/LlamaQt.conf einmalig beim Start
 
 #include <QCoreApplication>
 #include <QDir>
@@ -20,7 +19,10 @@
 
 #include "../common/McpServer.h"
 #include "../common/PathPolicy.h"
+#include "../common/McpConfig.h"
+#include "../filesystem/GitHelper.h"
 
+// Bestehende Tools
 #include "ListSymbolsTool.h"
 #include "GetFunctionBodyTool.h"
 #include "GetClassMembersTool.h"
@@ -29,42 +31,49 @@
 #include "GetCallGraphTool.h"
 #include "CheckSyntaxTool.h"
 
+// Neue Tools v3.0
+#include "GetSymbolTool.h"
+#include "ReplaceSymbolTool.h"
+#include "IndexTools.h"         // GetProjectIndexTool + RebuildIndexTool
+
 int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
 
-    // ── Konfiguration aus Umgebungsvariablen ──────────────────────────────────
-    QString sandboxPath = qEnvironmentVariable(
-        "LLAMAQT_SANDBOX",
-        QDir::homePath() + "/llamatools");
+    // ── Konfiguration aus INI lesen ───────────────────────────────────────────
+    // McpConfig liest ~/.config/LlamaQt/LlamaQt.conf direkt.
+    // Umgebungsvariablen überschreiben INI-Werte (Fallback-Kompatibilität).
+    McpConfig cfg;
 
-    QString sourcesPath = qEnvironmentVariable(
-        "LLAMAQT_SOURCES",
-        QDir::homePath() + "/ai/LlamaQT");
+    QString sandboxPath = cfg.sandboxRoot();
+    QString sourcesPath = cfg.sourceRoot();
+    QString trashPath   = cfg.trashPath();
 
     // ── PathPolicy aufbauen ───────────────────────────────────────────────────
-    // Beide Roots sind für den tree-sitter-Server read-only:
-    //   writable=true  bedeutet in PathPolicy nur "auch Schreiben erlaubt".
-    //   Wir setzen writable=true für die Sandbox damit relative Pfade
-    //   korrekt aufgelöst werden (resolveRead sucht zuerst in writable Roots).
-    //   Die Tool-Klassen rufen nur resolveRead() auf — kein Schreiben möglich.
+    // Sandbox: writable=true  → replace_symbol darf hier schreiben
+    // Sources: writable=false → nur Lesen (LlamaQT-Quellcode)
     PathPolicy policy;
-    policy.addRoot(sandboxPath, true);   // Sandbox: Lesen + (theoretisch) Schreiben
-    policy.addRoot(sourcesPath, false);  // Sources: nur Lesen
+    policy.addRoot(sandboxPath, true);
+    policy.addRoot(sourcesPath, false);
 
+    // ── GitHelper aufbauen ────────────────────────────────────────────────────
+    // Neu in v3.0: ReplaceSymbolTool braucht git für auto-commit.
+    // GitHelper lebt auf dem Stack in main() — überlebt alle Tools garantiert.
+    GitHelper git(policy);
+
+    // ── Logging ───────────────────────────────────────────────────────────────
     QTextStream err(stderr);
-    err << "[llamaqt-treesitter v2.1]\n";
-    err << "  Sandbox: " << sandboxPath << "\n";
-    err << "  Sources: " << sourcesPath << "\n";
+    err << "[llamaqt-treesitter v3.0]\n";
+    err << "  Sandbox (rw): " << sandboxPath << "\n";
+    err << "  Sources (ro): " << sourcesPath << "\n";
+    err << "  Trash:        " << trashPath   << "\n";
+    err << "  Index cache:  " << cfg.cachePath() << "\n";
     err.flush();
 
-    // ── McpServer aufbauen + Tools registrieren ───────────────────────────────
-    // Dependency Injection Chain:
-    //   main() kennt policy.
-    //   Alle Tools bekommen &policy im Konstruktor.
-    //   McpServer kennt nur ToolBase* — weiß nichts von PathPolicy.
-    McpServer server("llamaqt-treesitter", "2.1");
+    // ── McpServer aufbauen ────────────────────────────────────────────────────
+    McpServer server("llamaqt-treesitter", "3.0");
 
+    // ── Bestehende Tools (v2.1) ───────────────────────────────────────────────
     server.registerTool(std::make_unique<ListSymbolsTool>(&policy));
     server.registerTool(std::make_unique<GetFunctionBodyTool>(&policy));
     server.registerTool(std::make_unique<GetClassMembersTool>(&policy));
@@ -72,6 +81,17 @@ int main(int argc, char *argv[])
     server.registerTool(std::make_unique<GetClassHierarchyTool>(&policy));
     server.registerTool(std::make_unique<GetCallGraphTool>(&policy));
     server.registerTool(std::make_unique<CheckSyntaxTool>(&policy));
+
+    // ── Neue Tools (v3.0) ─────────────────────────────────────────────────────
+    // GetSymbolTool: liest aus beiden Roots (kein GitHelper nötig)
+    server.registerTool(std::make_unique<GetSymbolTool>(&policy));
+
+    // ReplaceSymbolTool: schreibt in Sandbox → braucht GitHelper
+    server.registerTool(std::make_unique<ReplaceSymbolTool>(&policy, &git));
+
+    // Index-Tools: lesen INI selbst via McpConfig
+    server.registerTool(std::make_unique<GetProjectIndexTool>(&policy));
+    server.registerTool(std::make_unique<RebuildIndexTool>(&policy));
 
     server.run();
     return 0;
