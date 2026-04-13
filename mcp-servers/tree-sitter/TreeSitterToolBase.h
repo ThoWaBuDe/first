@@ -116,7 +116,7 @@ protected:
     }
 
     // ── Datei-Typ-Prüfung ────────────────────────────────────────────────────
-
+public:
     static bool isAllowedFile(const QString &path)
     {
         QFileInfo fi(path);
