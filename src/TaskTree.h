@@ -53,7 +53,9 @@ public:
             m_roots.push_back(node);
         }
 
+
         m_index[node->id] = node;
+        node->dirty = true;
         m_dirty = true;
         return node;
     }
@@ -248,6 +250,56 @@ public:
     bool isEmpty()   const { return m_roots.empty(); }
     int  nodeCount() const { return static_cast<int>(m_index.size()); }
     const std::vector<TaskNode*> &roots() const { return m_roots; }
+// ─── removeNode ──────────────────────────────────────────────────────────────
+// Löscht einen Knoten + alle seine Kinder rekursiv aus dem Tree.
+// Bereinigt m_index für alle gelöschten Knoten.
+// Hängt den Knoten aus dem Elternknoten (oder m_roots) aus.
+//
+// Warum rekursive Index-Bereinigung?
+//   m_index ist ein QHash<qint64, TaskNode*>. Wenn wir nur den obersten Knoten
+//   löschen aber seine Kinder im Index lassen, entstehen dangling pointers.
+//   Die rekursive Bereinigung stellt sicher dass m_index konsistent bleibt.
+//
+// Analogie AVR: wie das Freigeben einer verketteten Liste — erst alle
+//   Folgeelemente (Kinder) freigeben, dann das Element selbst.
+//   Ohne das würden wir "memory leaks" im Index hinterlassen.
+//
+// Einzufügen in TaskTree.h nach:
+//   const std::vector<TaskNode*> &roots() const { return m_roots; }
+//
+void removeNode(TaskNode *node)
+{
+    if (!node) return;
+
+    // Schritt 1: alle Knoten (dieser + alle Kinder) aus m_index entfernen.
+    // Wir traversieren den Teilbaum vor dem Löschen — danach sind die
+    // Pointer ungültig.
+    // traverse() auf dem Teilbaum: wir rufen traverseNode() direkt.
+    std::function<void(TaskNode*)> removeFromIndex = [&](TaskNode *n) {
+        m_index.remove(n->id);
+        for (TaskNode *child : n->children)
+            removeFromIndex(child);
+    };
+    removeFromIndex(node);
+
+    // Schritt 2: Knoten aus Eltern oder m_roots aushängen.
+    if (node->parent) {
+        // Aus Eltern-children-Vector entfernen (nicht löschen — delete folgt)
+        node->parent->removeChild(node);
+    } else {
+        // Wurzelknoten → aus m_roots entfernen
+        auto it = std::find(m_roots.begin(), m_roots.end(), node);
+        if (it != m_roots.end())
+            m_roots.erase(it);
+    }
+
+    // Schritt 3: Knoten + Kinder rekursiv löschen.
+    // TaskNode-Destruktor löscht children rekursiv — ein delete reicht.
+    delete node;
+
+    m_dirty = true;
+}
+
 
     // DB-Pfad nachtraglich setzen (fuer Dialoge: Speichern unter / Laden)
     void setDbPath(const QString &path) {

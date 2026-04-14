@@ -30,6 +30,7 @@ set(SOURCES
     src/ConfigDialog.cpp
     src/EditorDock.cpp
     src/PlannerDock.cpp
+    src/TaskNodeDialog.cpp
 )
 
 set(HEADERS
@@ -48,6 +49,7 @@ set(HEADERS
     src/TaskNode.h
     src/TaskTree.h
     src/TaskTreeModel.h
+    src/TaskNodeDialog.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}

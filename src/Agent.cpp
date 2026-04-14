@@ -579,26 +579,16 @@ void Agent::startPlan(const QString &auftrag)
 }
 
 // ─── buildPlannerSystemPrompt ────────────────────────────────────────────────
-// Erklärt dem Modell welche Lese-Tools es hat und das <plan>...</plan> Format.
-//
-// WICHTIG: Kein Raw-String-Literal (R"(...)") verwenden wenn der String
-// Unicode-Sonderzeichen wie em-Dash (—) enthält. Der C++ Compiler behandelt
-// diese in Raw-Strings korrekt, aber manche Build-Systeme oder Compiler-
-// Versionen haben damit Probleme (extended character not valid in identifier).
-//
-// Lösung: Normaler QString mit expliziter Verkettung. Jede Zeile ist ein
-// eigenes String-Literal — der Compiler fügt sie zur Compile-Zeit zusammen
-// (String-Literal-Concatenation, C++ Standard).
-// Analogie AVR: wie PROGMEM-Strings die in einzelne Blöcke aufgeteilt werden.
+// Ersatz für die Methode in Agent.cpp.
+// Änderungen gegenüber vorheriger Version:
+//   - H3-Regel erklärt: Implementierungsschritte → eigene children[]
+//   - Beispiel-JSON zeigt H3-Knoten explizit
+//   - scope-Semantik klarer beschrieben
+//   - dependsOn: Beispiel mit Klasse→Methode Abhängigkeit
+
 QString Agent::buildPlannerSystemPrompt(const QString &auftrag) const
 {
     Q_UNUSED(auftrag)
-
-    // Warum aufgeteilt statt ein langer String?
-    //   - Kein Raw-String-Literal nötig (vermeidet Encoding-Probleme)
-    //   - Jede Zeile kompiliert sauber
-    //   - JSON-Beispiel im String erzeugt keine Compiler-Verwirrung
-    //     weil kein R"(...)" Delimiter das Parsing stört
     return QString(
         "Du bist ein Planungs-Agent fuer C++/Qt6 Projekte.\n"
         "\n"
@@ -618,32 +608,79 @@ QString Agent::buildPlannerSystemPrompt(const QString &auftrag) const
         "get_symbol -- Symbol in Datei suchen\n"
         "  <tool_call>{\"name\": \"get_symbol\", \"arguments\": {\"path\": \"datei.cpp\", \"symbol\": \"MyClass\"}}</tool_call>\n"
         "\n"
-        "get_project_index -- Projektuebersicht (Markdown-Index)\n"
+        "get_project_index -- Projektuebersicht\n"
         "  <tool_call>{\"name\": \"get_project_index\", \"arguments\": {}}</tool_call>\n"
         "\n"
         "get_time, sys_info, disk_free, get_pwd -- Systeminfos\n"
         "\n"
         "VERBOTEN: write_file, str_replace, append_file, cmake_build, check_run\n"
         "\n"
-        "PLAN-FORMAT:\n"
-        "Wenn du genug analysiert hast, gib GENAU DIESEN Block aus:\n"
+        "HIERARCHIE-REGELN:\n"
+        "level 0 (H0) -- Gesamtziel (genau 1x, die Wurzel)\n"
+        "level 1 (H1) -- Dateigruppe oder Modul (z.B. 'Core Game Logic', 'UI Layer')\n"
+        "level 2 (H2) -- Einzelne Datei/Klasse (z.B. 'GameEngine.h', 'GameEngine.cpp')\n"
+        "level 3 (H3) -- Implementierungsschritt innerhalb einer Datei\n"
+        "level 4+ (H4+) -- Feinere Details wenn noetig\n"
         "\n"
+        "H3-REGEL (wichtig!):\n"
+        "  Wenn ein H2-Knoten Implementierungsschritte enthaelt\n"
+        "  (Methoden, Algorithmen, Logik) -- gib diese als children[] mit level=3 aus.\n"
+        "  Reine Interface-Dateien (.h ohne Implementierung) duerfen Blatt auf H2 bleiben.\n"
+        "  Beispiel: 'GameEngine.h' -> H2-Blatt (nur Deklarationen)\n"
+        "            'GameEngine.cpp' -> H2 mit H3-children (Methodenimplementierungen)\n"
+        "\n"
+        "scope-BEDEUTUNG:\n"
+        "  external -- oeffentliches Interface (public Methoden, .h Deklarationen)\n"
+        "  internal -- Implementierungsdetail (private, .cpp Definitionen, Algorithmen)\n"
+        "\n"
+        "dependsOn-VERWENDUNG:\n"
+        "  Liste von Titeln anderer Knoten auf die dieser Knoten angewiesen ist.\n"
+        "  Beispiel: Eine Methode haengt von der Klasse ab die sie aufruft.\n"
+        "  Sinn: Der Execute-Agent bekommt das Interface der Abhaengigkeit als Kontext.\n"
+        "\n"
+        "PLAN-FORMAT:\n"
         "<plan>\n"
         "{\n"
-        "  \"goal\": \"Kurzer Titel des Gesamtziels (H0)\",\n"
+        "  \"goal\": \"TicTacToe Qt6 App\",\n"
         "  \"children\": [\n"
         "    {\n"
-        "      \"title\": \"H1-Aufgabe (z.B. Dateistruktur)\",\n"
+        "      \"title\": \"Core Logic\",\n"
         "      \"level\": 1,\n"
         "      \"scope\": \"external\",\n"
-        "      \"description\": \"Was hier zu tun ist. Praezise.\",\n"
+        "      \"description\": \"Spiellogik getrennt von UI\",\n"
         "      \"children\": [\n"
         "        {\n"
-        "          \"title\": \"H2-Unteraufgabe (z.B. MainWindow.h)\",\n"
+        "          \"title\": \"GameState.h\",\n"
+        "          \"level\": 2,\n"
+        "          \"scope\": \"external\",\n"
+        "          \"description\": \"class GameState: board, currentPlayer, makeMove(), checkWin()\",\n"
+        "          \"dependsOn\": [],\n"
+        "          \"children\": []\n"
+        "        },\n"
+        "        {\n"
+        "          \"title\": \"GameState.cpp\",\n"
         "          \"level\": 2,\n"
         "          \"scope\": \"internal\",\n"
-        "          \"description\": \"Konkrete Impl-Hints, erwartete Signaturen.\",\n"
-        "          \"dependsOn\": []\n"
+        "          \"description\": \"Implementierung aller GameState-Methoden\",\n"
+        "          \"dependsOn\": [\"GameState.h\"],\n"
+        "          \"children\": [\n"
+        "            {\n"
+        "              \"title\": \"makeMove() implementieren\",\n"
+        "              \"level\": 3,\n"
+        "              \"scope\": \"internal\",\n"
+        "              \"description\": \"Prueft Gueltigkeit (board leer?), setzt Feld, wechselt Spieler, ruft checkWin()\",\n"
+        "              \"dependsOn\": [\"GameState.h\"],\n"
+        "              \"children\": []\n"
+        "            },\n"
+        "            {\n"
+        "              \"title\": \"checkWin() implementieren\",\n"
+        "              \"level\": 3,\n"
+        "              \"scope\": \"internal\",\n"
+        "              \"description\": \"Prueft alle 8 Gewinnlinien (3 Zeilen, 3 Spalten, 2 Diagonalen)\",\n"
+        "              \"dependsOn\": [],\n"
+        "              \"children\": []\n"
+        "            }\n"
+        "          ]\n"
         "        }\n"
         "      ]\n"
         "    }\n"
@@ -651,16 +688,16 @@ QString Agent::buildPlannerSystemPrompt(const QString &auftrag) const
         "}\n"
         "</plan>\n"
         "\n"
-        "REGELN FUER DEN PLAN:\n"
-        "- level: 1 = Dateigruppe/Modul, 2 = einzelne Klasse/Datei, 3 = Impl-Detail\n"
-        "- scope: \"external\" = oeffentliches Interface, \"internal\" = Implementierungsdetail\n"
-        "- dependsOn: Liste von Titeln anderer H2-Knoten (kann leer sein)\n"
-        "- description: Praezise -- was genau implementiert werden muss\n"
-        "- Keine Prosa nach dem </plan> Block\n"
+        "REGELN:\n"
+        "- Jeder Knoten hat: title, level, scope, description, dependsOn, children\n"
+        "- dependsOn: Liste von Titeln (Strings), kein leeres Weglassen sondern []\n"
+        "- children: [] wenn Blatt, sonst Array mit Kindknoten\n"
+        "- Keine Prosa nach </plan>\n"
         "\n"
         "Antworte auf Deutsch."
         );
 }
+
 
 
 // ─── handlePlanToolCall ───────────────────────────────────────────────────────
