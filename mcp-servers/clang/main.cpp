@@ -31,9 +31,9 @@ int main(int argc, char *argv[])
 {
     QCoreApplication app(argc, argv);
 
-    QString projectRoot = QDir::homePath() + "/ai/LlamaQT";
+    QString projectRoot = QDir::homePath() + "/llamatools";
     PathPolicy policy;
-    policy.addRoot(projectRoot, true);
+ //   policy.addRoot(projectRoot, true);
 
     QTextStream err(stderr);
     err << "[llamaqt-clang v1.0]\n";

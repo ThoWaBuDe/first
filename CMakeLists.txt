@@ -8,7 +8,7 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 # ─── Qt6 ────────────────────────────────────────────────────────────────────
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Sql)
 
 # ─── Llama.cpp ──────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
@@ -60,6 +60,7 @@ target_link_libraries(LlamaQt PRIVATE
     Qt6::Core
     Qt6::Gui
     Qt6::Widgets
+    Qt6::Sql
     PkgConfig::LLAMA
 )
 

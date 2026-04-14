@@ -60,9 +60,7 @@ int main(int argc, char *argv[])
         "LLAMAQT_SANDBOX",
         QDir::homePath() + "/llamatools");
 
-    QString sourcesPath = qEnvironmentVariable(
-        "LLAMAQT_SOURCES",
-        QDir::homePath() + "/ai/LlamaQT");
+    QString sourcesPath = qEnvironmentVariable("LLAMAQT_SOURCES", QDir::homePath());// + "/ai/LlamaQT");
 
     QString trashPath = qEnvironmentVariable(
         "LLAMAQT_TRASH",

@@ -42,8 +42,8 @@ public:
 
         // ── ProjectIndex ───────────────────────────────────────────────────
         m_settings.beginGroup("ProjectIndex");
-        m_sourceRoot  = m_settings.value("source_root",
-                            home + "/ai/LlamaQT").toString();
+        m_sourceRoot  ="";// m_settings.value("source_root",
+                          //  home + "/ai/LlamaQT").toString();
         m_sandboxRoot = m_settings.value("sandbox_root",
                             home + "/llamatools").toString();
         m_cachePath   = m_settings.value("cache_path",

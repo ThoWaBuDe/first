@@ -69,8 +69,8 @@ void AppConfig::load()
     // nicht als Membervariablen-Initialisierer — homePath() braucht Qt-Runtime.
     const QString home = QDir::homePath();
     m_settings.beginGroup("ProjectIndex");
-    m_indexSourceRoot  = m_settings.value("source_root",
-                            home + "/ai/LlamaQT").toString();
+    m_indexSourceRoot  = ""; //m_settings.value("source_root",
+                            //home + "/ai/LlamaQT").toString();
     m_indexSandboxRoot = m_settings.value("sandbox_root",
                             home + "/llamatools").toString();
     m_indexCachePath   = m_settings.value("cache_path",
