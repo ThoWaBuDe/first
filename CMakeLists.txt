@@ -29,6 +29,7 @@ set(SOURCES
     src/ChatLogger.cpp
     src/ConfigDialog.cpp
     src/EditorDock.cpp
+    src/PlannerDock.cpp
 )
 
 set(HEADERS
@@ -43,6 +44,7 @@ set(HEADERS
     src/ChatLogger.h
     src/ConfigDialog.h
     src/EditorDock.h
+    src/PlannerDock.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}

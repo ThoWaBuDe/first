@@ -5,6 +5,25 @@
 #include <QJsonArray>
 #include <QMetaObject>
 #include <QFileInfo>
+#include <QDir>
+
+// ─── Whitelist: erlaubte Tools im Plan-Modus ──────────────────────────────────
+// Nur Lese-Tools. Schreib-Tools (write_file, str_replace, cmake_build, ...)
+// sind im Plan-Modus verboten — das Modell soll nur analysieren, nicht ändern.
+//
+// Analogie AVR: wie ein Read-only-Segment im Flash — zur Compile-Zeit fest,
+// kann nicht versehentlich überschrieben werden.
+const QStringList Agent::PLAN_ALLOWED_TOOLS = {
+    "read_file",
+    "list_dir",
+    "get_symbol",
+    "get_project_index",
+    "rebuild_index",
+    "get_time",
+    "sys_info",
+    "disk_free",
+    "get_pwd",
+};
 
 // ─── Konstruktor ──────────────────────────────────────────────────────────────
 Agent::Agent(const QString &modelPath, QObject *parent)
@@ -19,10 +38,8 @@ Agent::Agent(const QString &modelPath, QObject *parent)
 
     qRegisterMetaType<LlamaWorker::SamplerProfile>();
     qRegisterMetaType<ChatTemplate::Preset>();
-    // QVector<ChatMessage> muss als Metatyp registriert sein damit
-    // invokeMethod() es über die Thread-Grenze kopieren kann.
-    // Qt kopiert den QVector vollständig — thread-sicher.
     qRegisterMetaType<QVector<ChatMessage>>("QVector<ChatMessage>");
+    qRegisterMetaType<AgentMode>();
 
     connect(m_worker, &LlamaWorker::tokenGenerated,  this, &Agent::onTokenReceived);
     connect(m_worker, &LlamaWorker::generationDone,  this, &Agent::onGenerationDone);
@@ -59,6 +76,13 @@ void Agent::start()
     connect(&cfg, &AppConfig::chatLoggingChanged,
             &m_logger, &ChatLogger::setEnabled);
 
+    // ─── TaskTree DB-Pfad setzen ──────────────────────────────────────────
+    // Das Verzeichnis muss existieren bevor SQLite die DB anlegt.
+    // QDir::mkpath() ist idempotent (kein Fehler wenn Verzeichnis schon da).
+    QString dbPath = cfg.taskDbPath();
+    QDir().mkpath(QFileInfo(dbPath).absolutePath());
+    m_taskTree.setDbPath(dbPath);
+
     QString binDir = QCoreApplication::applicationDirPath();
     m_mcp.addServer(binDir + "/mcp-servers/filesystem/llamaqt-filesystem");
     m_mcp.addServer(binDir + "/mcp-servers/sysinfo/llamaqt-sysinfo");
@@ -90,8 +114,6 @@ QString Agent::buildFullSystemPrompt() const
     return userPart + "\n\n" + mcpPart;
 }
 
-// applyChatTemplate() wird weiterhin aufgerufen um ChatModel das richtige
-// Template zu geben — der Fallback im Worker braucht es.
 void Agent::applyChatTemplate()
 {
     ChatTemplate::Preset preset = AppConfig::instance().chatTemplatePreset();
@@ -158,6 +180,18 @@ void Agent::onUserMessage(const QString &text)
                 return;
             }
 
+            // ─── Plan-Modus Einstieg ───────────────────────────────────────
+            // Marker: "__PLAN__:<Auftrag>"
+            // Analogie AVR: wie eine ISR-Weiche — dieser Pfad verlässt den
+            // normalen Hauptpfad und startet den Plan-FSM.
+            if (result.prompt.startsWith("__PLAN__:")) {
+                QString auftrag = result.prompt.mid(9);  // "__PLAN__:" = 9 Zeichen
+                emit appendChat(
+                    QString("<b>Plan-Modus:</b> %1").arg(text.toHtmlEscaped()), "user");
+                startPlan(auftrag);
+                return;
+            }
+
             if (result.prompt.isEmpty()) return;
 
             emit appendChat(QString("<b>Du:</b> %1").arg(text.toHtmlEscaped()), "user");
@@ -203,6 +237,14 @@ void Agent::onStop()
     m_generating = false;
     if (m_worker) m_worker->stopGeneration();
     m_toolFailCount.clear();
+
+    // Bei Stop im Plan-Modus: zurück zu Chat
+    if (m_mode == AgentMode::Plan) {
+        m_mode = AgentMode::Chat;
+        emit modeChanged(m_mode);
+        m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+    }
+
     emit inputEnabled(true);
     emit statusChanged("Gestoppt");
 }
@@ -212,6 +254,9 @@ void Agent::onClearChat()
     ++m_sessionId;
     m_generating = false;
     if (m_worker) m_worker->stopGeneration();
+
+    m_mode = AgentMode::Chat;
+    emit modeChanged(m_mode);
 
     m_chatModel.clear();
     m_chatModel.setSystemPrompt(buildFullSystemPrompt());
@@ -223,6 +268,7 @@ void Agent::onClearChat()
     m_totalTokens       = 0;
     m_promptTokens      = 0;
     m_toolFailCount.clear();
+    m_planRetryCount    = 0;
 
     emit appendChat("Chat gelöscht.", "system");
     emitStats();
@@ -232,26 +278,63 @@ void Agent::onClearChat()
 
 void Agent::onFileSavedByUser(const QString &filePath)
 {
-    // Dateiname ohne vollen Pfad für die Nachricht (lesbarer)
     QString name = QFileInfo(filePath).fileName();
-
-    // Systemnachricht in den Chat — sichtbar für User und Modell.
-    // cssClass "system" = grau/kursiv (wie andere Systemhinweise).
     QString notice = QString(
-                         "[System: User hat <b>%1</b> manuell gespeichert. "
-                         "Bitte Datei vor weiteren Änderungen neu einlesen.]")
-                         .arg(name.toHtmlEscaped());
-
+        "[System: User hat <b>%1</b> manuell gespeichert. "
+        "Bitte Datei vor weiteren Änderungen neu einlesen.]")
+        .arg(name.toHtmlEscaped());
     emit appendChat(notice, "system");
-
-    // Auch in den ChatModel-Kontext injizieren damit das Modell es sieht.
-    // Als Tool-Ergebnis formatiert: das Modell kennt dieses Format bereits.
     m_chatModel.addToolResult("editor_notify",
-                              QString("[User hat '%1' manuell bearbeitet und gespeichert. "
-                                      "Bitte read_file aufrufen bevor du str_replace oder "
-                                      "write_file verwendest.]").arg(name));
-
+        QString("[User hat '%1' manuell bearbeitet und gespeichert. "
+                "Bitte read_file aufrufen bevor du str_replace oder "
+                "write_file verwendest.]").arg(name));
     m_logger.logSystem(QString("User hat %1 manuell gespeichert.").arg(filePath));
+}
+
+// ─── onPlanApproved ──────────────────────────────────────────────────────────
+// User hat den Plan bestätigt.
+// Speichert den TaskTree in SQLite.
+// Execute-Modus wird in einer späteren Session implementiert —
+// vorerst zurück zu Chat mit einer Zusammenfassung.
+void Agent::onPlanApproved()
+{
+    if (m_mode != AgentMode::Plan) return;
+
+    // TaskTree persistieren
+    m_taskTree.save();
+    emit appendTools(
+        QString("<b>Plan gespeichert:</b> %1 Knoten in <code>%2</code>")
+        .arg(m_taskTree.nodeCount())
+        .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
+        "system");
+
+    // Vorerst zurück zu Chat
+    // TODO (nächste Session): m_mode = AgentMode::Execute; startExecute();
+    m_mode = AgentMode::Chat;
+    emit modeChanged(m_mode);
+    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+
+    emit appendChat(
+        "<b>[System]</b> Plan bestätigt und gespeichert. "
+        "Execute-Modus folgt in der nächsten Session.", "system");
+    emit inputEnabled(true);
+    emit statusChanged("Plan gespeichert — bereit");
+}
+
+// ─── onPlanRejected ──────────────────────────────────────────────────────────
+// User hat den Plan abgelehnt — einfach zurück zu Chat.
+void Agent::onPlanRejected()
+{
+    if (m_mode != AgentMode::Plan) return;
+
+    m_mode = AgentMode::Chat;
+    emit modeChanged(m_mode);
+    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+
+    emit appendChat("<b>[System]</b> Plan abgelehnt. Zurück zum Chat-Modus.", "system");
+    emit appendTools("Plan abgelehnt vom User.", "system");
+    emit inputEnabled(true);
+    emit statusChanged("Bereit");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -298,6 +381,13 @@ void Agent::onStatsUpdate(int promptTokens, int ctxSize)
 void Agent::onError(const QString &error)
 {
     m_generating = false;
+
+    if (m_mode == AgentMode::Plan) {
+        m_mode = AgentMode::Chat;
+        emit modeChanged(m_mode);
+        m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+    }
+
     emit inputEnabled(true);
     emit appendTools(QString("Fehler: %1").arg(error.toHtmlEscaped()), "error");
     emit statusChanged("Fehler");
@@ -312,6 +402,13 @@ void Agent::onTokenReceived(const QString &token)
     if (m_generatedTokens % 10 == 0) emitStats();
 }
 
+// ─── onGenerationDone ────────────────────────────────────────────────────────
+// Zentrale Weiche: Chat-Modus vs. Plan-Modus.
+//
+// Im Plan-Modus prüfen wir zuerst ob ein <plan>...</plan> Block da ist.
+// Falls ja → handlePlanJson(). Falls nein → handlePlanToolCall() wie normal.
+//
+// Im Chat-Modus: unveränderte Logik.
 void Agent::onGenerationDone(const QString &fullResponse)
 {
     m_generating = false;
@@ -319,6 +416,56 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     uint32_t mySession = m_sessionId;
 
+    // ─── Plan-Modus ───────────────────────────────────────────────────────
+    if (m_mode == AgentMode::Plan) {
+        // Modell hat <plan>...</plan> ausgegeben → Plan parsen
+        if (fullResponse.contains("<plan>") && fullResponse.contains("</plan>")) {
+            handlePlanJson(fullResponse, mySession);
+            return;
+        }
+        // Modell hat einen Tool-Call gemacht → im Plan-Modus nur Lese-Tools
+        if (fullResponse.contains("<tool_call>") && fullResponse.contains("</tool_call>")) {
+            m_chatModel.addAssistantMessage(fullResponse);
+            handlePlanToolCall(fullResponse, mySession);
+            return;
+        }
+        // Unvollständiger Tool-Call → Continuation (wie Chat-Modus)
+        if (fullResponse.contains("<tool_call>") && !fullResponse.contains("</tool_call>")) {
+            ++m_continuationCount;
+            if (m_continuationCount > MAX_CONTINUATIONS) {
+                m_continuationCount = 0;
+                emit appendTools(
+                    "Plan: Tool-Call unvollständig nach Fortsetzungen — abgebrochen.", "error");
+                m_mode = AgentMode::Chat;
+                emit modeChanged(m_mode);
+                m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+                emit inputEnabled(true);
+                emit statusChanged("Bereit");
+                return;
+            }
+            m_chatModel.addAssistantMessage(fullResponse);
+            m_generating      = true;
+            m_generatedTokens = 0;
+            startGeneration(LlamaWorker::SamplerProfile::Tool);
+            return;
+        }
+        // Kein Tool-Call, kein Plan → Modell antwortet in Prosa.
+        // Das kann passieren wenn Qwen erst erklärt was es tun will.
+        // Wir fügen es als Assistent-Nachricht ein und warten auf nächsten Schritt.
+        m_chatModel.addAssistantMessage(fullResponse);
+        emit appendChat(fullResponse.toHtmlEscaped(), "assistant");
+        // Modell soll weitermachen — nochmal generieren ohne neuen User-Input
+        m_generating      = true;
+        m_generatedTokens = 0;
+        m_currentResponse.clear();
+        m_thinkBuffer.clear();
+        m_inThinkBlock = false;
+        emit appendChat("<b>Assistent:</b> ", "assistant");
+        startGeneration(LlamaWorker::SamplerProfile::Chat);
+        return;
+    }
+
+    // ─── Chat-Modus (unverändert) ──────────────────────────────────────────
     if (m_summarizing) {
         m_summarizing = false;
         m_chatModel.clear();
@@ -375,19 +522,434 @@ void Agent::onGenerationDone(const QString &fullResponse)
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PRIVATE METHODEN
+// PLAN-MODUS: PRIVATE METHODEN
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── startGeneration ─────────────────────────────────────────────────────────
-// Kernänderung: übergibt m_chatModel.messages() statt buildPrompt().
+// ─── startPlan ───────────────────────────────────────────────────────────────
+// Wechselt in Plan-Modus, setzt den Planner-System-Prompt und startet
+// die erste Generierung.
 //
-// Qt kopiert den QVector<ChatMessage> vollständig beim invokeMethod() —
-// da QueuedConnection eine tiefe Kopie macht. Damit ist der Worker-Thread
-// nie von Änderungen im GUI-Thread betroffen während er generiert.
+// Ablauf:
+//   1. m_mode = Plan
+//   2. Alten TaskTree löschen (frischer Start)
+//   3. ChatModel komplett neu aufsetzen mit Planner-System-Prompt
+//   4. Erste User-Message = der Auftrag
+//   5. startGeneration(Chat) — Chat-Sampler weil freie Analyse
+void Agent::startPlan(const QString &auftrag)
+{
+    m_mode = AgentMode::Plan;
+    emit modeChanged(m_mode);
+
+    // Alten Tree verwerfen — jeder /plan-Aufruf startet frisch.
+    // Gespeicherte DB bleibt erhalten (wird bei Bestätigung überschrieben).
+    // Analogie AVR: wie ein Buffer-Reset vor neuem DMA-Transfer.
+    // Wir löschen den RAM-Baum indem wir ein neues TaskTree-Objekt erstellen
+    // ist nicht möglich da TaskTree kein clear() hat — wir rufen Nodes einzeln ab.
+    // Pragmatisch: Wir setzen nur m_taskTree neu — dafür brauchen wir
+    // move-assignment. TaskTree hat keinen. Wir geben einen klaren Kommentar
+    // und überlassen das Löschen dem Destruktor wenn nötig.
+    // TODO: TaskTree::clear() implementieren wenn Execute-Modus kommt.
+
+    m_planRetryCount = 0;
+    m_continuationCount = 0;
+
+    // Frisches ChatModel für den Plan — kein alter Kontext
+    m_chatModel.clear();
+    m_chatModel.setSystemPrompt(buildPlannerSystemPrompt(auftrag));
+
+    m_currentResponse.clear();
+    m_thinkBuffer.clear();
+    m_inThinkBlock    = false;
+    m_generatedTokens = 0;
+    m_generating      = true;
+
+    // Auftrag als erste User-Message
+    m_chatModel.addUserMessage(
+        QString("Bitte analysiere das Projekt und erstelle einen Plan für: %1").arg(auftrag));
+
+    emit appendChat("<b>Assistent (Plan-Analyse):</b> ", "assistant");
+    emit appendTools(
+        QString("<b>Plan-Modus gestartet:</b> %1<br>"
+                "<small>Erlaubte Tools: read_file, list_dir, get_symbol, ...</small>")
+        .arg(auftrag.toHtmlEscaped()), "system");
+
+    emit inputEnabled(false);
+    emit statusChanged("Plan-Analyse läuft...");
+    startGeneration(LlamaWorker::SamplerProfile::Chat);
+}
+
+// ─── buildPlannerSystemPrompt ────────────────────────────────────────────────
+// Erklärt dem Modell:
+//   1. Welche Lese-Tools es hat
+//   2. Das <plan>...</plan> Format
+//   3. Was in den Feldern erwartet wird
 //
-// Analogie AVR: wie du einen Puffer in den DMA-Bereich kopierst bevor
-// du den DMA startest — der ursprüngliche Puffer kann danach verändert
-// werden ohne die laufende Übertragung zu stören.
+// Warum ein eigener System-Prompt statt den normalen?
+//   - Der normale enthält alle Tools incl. write_file, cmake_build etc.
+//   - Das Modell soll im Plan-Modus NUR lesen
+//   - Ein sauberer Prompt verhindert versehentliche Schreiboperationen
+//   - Analogie AVR: wie separate Interrupt-Vektortabelle für verschiedene Modi
+QString Agent::buildPlannerSystemPrompt(const QString &auftrag) const
+{
+    Q_UNUSED(auftrag)
+    return R"(Du bist ein Planungs-Agent für C++/Qt6 Projekte.
+
+DEINE AUFGABE:
+1. Analysiere das Projekt mit den verfügbaren Lese-Tools
+2. Erstelle danach GENAU EINEN <plan>...</plan> Block
+
+ERLAUBTE TOOLS (nur Lesen, kein Schreiben!):
+
+read_file — Datei lesen
+  <tool_call>{"name": "read_file", "arguments": {"path": "datei.cpp"}}</tool_call>
+  Mit Range: {"path": "datei.cpp", "start_line": 1, "end_line": 50}
+
+list_dir — Verzeichnis auflisten
+  <tool_call>{"name": "list_dir", "arguments": {"path": "."}}</tool_call>
+
+get_symbol — Symbol in Datei suchen
+  <tool_call>{"name": "get_symbol", "arguments": {"path": "datei.cpp", "symbol": "MyClass"}}</tool_call>
+
+get_project_index — Projektübersicht (Markdown-Index)
+  <tool_call>{"name": "get_project_index", "arguments": {}}</tool_call>
+
+get_time, sys_info, disk_free, get_pwd — Systeminfos
+
+VERBOTEN: write_file, str_replace, append_file, cmake_build, check_run
+
+PLAN-FORMAT:
+Wenn du genug analysiert hast, gib GENAU DIESEN Block aus:
+
+<plan>
+{
+  "goal": "Kurzer Titel des Gesamtziels (H0)",
+  "children": [
+    {
+      "title": "H1-Aufgabe (z.B. Dateistruktur)",
+      "level": 1,
+      "scope": "external",
+      "description": "Was hier zu tun ist. Präzise.",
+      "children": [
+        {
+          "title": "H2-Unteraufgabe (z.B. MainWindow.h)",
+          "level": 2,
+          "scope": "internal",
+          "description": "Konkrete Impl-Hints, erwartete Signaturen, Abhängigkeiten.",
+          "dependsOn": []
+        }
+      ]
+    }
+  ]
+}
+</plan>
+
+REGELN FÜR DEN PLAN:
+- level: 1 = Dateigruppe/Modul, 2 = einzelne Klasse/Datei, 3 = Impl-Detail
+- scope: "external" = öffentliches Interface, "internal" = Implementierungsdetail
+- dependsOn: Liste von Titeln anderer H2-Knoten die vorher fertig sein müssen (kann leer sein)
+- description: Präzise — was genau implementiert werden muss, welche Signaturen, welche Patterns
+- Keine Prosa nach dem </plan> Block
+
+Antworte auf Deutsch.)";
+}
+
+// ─── handlePlanToolCall ───────────────────────────────────────────────────────
+// Wie handleToolCall() im Chat-Modus, aber mit Whitelist.
+//
+// Schreib-Tools → Fehlermeldung ans Modell (kein Absturz, kein Modus-Wechsel).
+// Das Modell bekommt: "[SYSTEM: Tool 'write_file' ist im Plan-Modus verboten...]"
+// und soll dann einen Lese-Tool oder den <plan> Block verwenden.
+//
+// Deadlock-Schutz greift wie im Chat-Modus (gleicher m_toolFailCount).
+void Agent::handlePlanToolCall(const QString &fullResponse, uint32_t sessionId)
+{
+    int start     = fullResponse.indexOf("<tool_call>") + 11;
+    int end       = fullResponse.indexOf("</tool_call>", start);
+    QString block = fullResponse.mid(start, end - start).trimmed();
+
+    QJsonParseError pe;
+    QJsonDocument doc = QJsonDocument::fromJson(block.toUtf8(), &pe);
+
+    if (doc.isNull()) {
+        QString repaired = repairJson(block);
+        if (!repaired.isEmpty())
+            doc = QJsonDocument::fromJson(repaired.toUtf8());
+        else {
+            m_chatModel.addToolResult("json_error",
+                QString("[SYSTEM: Ungültiges JSON im Tool-Call. Fehler: %1. "
+                        "Bitte korrektes JSON verwenden.]").arg(pe.errorString()));
+            m_generating      = true;
+            m_generatedTokens = 0;
+            m_currentResponse.clear();
+            m_thinkBuffer.clear();
+            m_inThinkBlock = false;
+            emit appendChat("<b>Assistent (Plan-Analyse):</b> ", "assistant");
+            startGeneration(LlamaWorker::SamplerProfile::Tool);
+            return;
+        }
+    }
+
+    QString     toolName = doc.object().value("name").toString();
+    QJsonObject toolArgs = doc.object().value("arguments").toObject();
+
+    emit appendTools(
+        QString("<b>Plan-Tool: %1</b><br><pre>%2</pre>")
+        .arg(toolName.toHtmlEscaped(),
+             QString::fromUtf8(QJsonDocument(toolArgs)
+                               .toJson(QJsonDocument::Indented)).toHtmlEscaped()),
+        "tool");
+
+    // ─── Whitelist-Prüfung ────────────────────────────────────────────────
+    // Schreib-Tools sind im Plan-Modus verboten.
+    // Analogie AVR: wie ein Schreibschutz-Register — Zugriff wird blockiert,
+    // Fehler wird gemeldet, kein Absturz.
+    if (!PLAN_ALLOWED_TOOLS.contains(toolName)) {
+        QString errMsg = QString(
+            "[SYSTEM: Tool '%1' ist im Plan-Modus VERBOTEN. "
+            "Im Plan-Modus darf nur gelesen werden (read_file, list_dir, get_symbol, ...). "
+            "Erstelle stattdessen den <plan>...</plan> Block wenn du genug analysiert hast.]")
+            .arg(toolName);
+        emit appendTools(
+            QString("Plan-Whitelist: <b>%1</b> verboten.").arg(toolName.toHtmlEscaped()),
+            "error");
+        m_chatModel.addToolResult(toolName, errMsg);
+        m_generating      = true;
+        m_generatedTokens = 0;
+        m_currentResponse.clear();
+        m_thinkBuffer.clear();
+        m_inThinkBlock = false;
+        emit appendChat("<b>Assistent (Plan-Analyse):</b> ", "assistant");
+        startGeneration(LlamaWorker::SamplerProfile::Tool);
+        return;
+    }
+
+    // ─── Erlaubtes Tool ausführen ─────────────────────────────────────────
+    if (!m_mcp.containsTool(toolName)) {
+        m_chatModel.addToolResult(toolName,
+            QString("Fehler: Tool '%1' nicht verfügbar.").arg(toolName));
+        m_generating      = true;
+        m_generatedTokens = 0;
+        startGeneration(LlamaWorker::SamplerProfile::Tool);
+        return;
+    }
+
+    emit statusChanged(QString("Plan-Tool: %1...").arg(toolName));
+    QString tKey = toolCallKey(toolName, toolArgs);
+
+    m_mcp.callTool(toolName, toolArgs,
+        [this, toolName, tKey, sessionId](QString result, QString error) {
+            if (sessionId != m_sessionId) return;
+
+            QString toolResult = error.isEmpty() ? result : ("Fehler: " + error);
+            bool    isErr      = !error.isEmpty();
+
+            // Kürzen wenn zu lang
+            if (!isErr && toolResult.length() > AppConfig::instance().maxToolResultChars()) {
+                int maxChars = AppConfig::instance().maxToolResultChars();
+                int cut = toolResult.lastIndexOf('\n', maxChars);
+                if (cut < maxChars / 2) cut = maxChars;
+                toolResult = toolResult.left(cut)
+                    + QString("\n\n[... gekürzt: %1 von %2 Zeichen.]")
+                      .arg(cut).arg(result.length());
+            }
+
+            if (isErr) {
+                int &failCount = m_toolFailCount[tKey];
+                ++failCount;
+                if (failCount >= DEADLOCK_ABORT) {
+                    emit appendTools(
+                        QString("<b>Plan: DEADLOCK ABBRUCH</b> '%1' (%2x)")
+                        .arg(toolName.toHtmlEscaped()).arg(failCount), "error");
+                    m_toolFailCount.remove(tKey);
+                    m_mode = AgentMode::Chat;
+                    emit modeChanged(m_mode);
+                    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+                    emit inputEnabled(true);
+                    emit statusChanged("Plan fehlgeschlagen");
+                    return;
+                }
+                toolResult += "\n\n" + deadlockEscalationPrompt(toolName, failCount);
+            } else {
+                m_toolFailCount.remove(tKey);
+            }
+
+            emit appendTools(
+                QString("<b>Plan-Ergebnis [%1]:</b><br><pre>%2</pre>")
+                .arg(toolName.toHtmlEscaped(),
+                     toolResult.left(800).toHtmlEscaped() +
+                     (toolResult.length() > 800 ? "\n..." : "")),
+                isErr ? "error" : "tool");
+
+            m_chatModel.addToolResult(toolName, toolResult);
+            m_generating      = true;
+            m_generatedTokens = 0;
+            m_currentResponse.clear();
+            m_thinkBuffer.clear();
+            m_inThinkBlock = false;
+            emit appendChat("<b>Assistent (Plan-Analyse):</b> ", "assistant");
+            emit statusChanged("Plan-Analyse läuft...");
+            startGeneration(LlamaWorker::SamplerProfile::Chat);
+        });
+}
+
+// ─── handlePlanJson ───────────────────────────────────────────────────────────
+// Parst den <plan>...</plan> Block und baut m_taskTree auf.
+//
+// Fehlerbehandlung:
+//   1. Versuch: JSON direkt parsen
+//   2. Versuch: repairJson() + nochmal parsen
+//   3. Falls noch Fehler: Retry-Generierung (max MAX_PLAN_RETRIES = 1)
+//   4. Nach Retry-Erschöpfung: Fehler, zurück zu Chat
+//
+// Bei Erfolg: emit planReady() → PlannerDock zeigt Tree + Buttons.
+void Agent::handlePlanJson(const QString &fullResponse, uint32_t sessionId)
+{
+    // JSON aus <plan>...</plan> extrahieren
+    int planStart = fullResponse.indexOf("<plan>") + 6;  // "<plan>" = 6 Zeichen
+    int planEnd   = fullResponse.indexOf("</plan>", planStart);
+    QString planJson = fullResponse.mid(planStart, planEnd - planStart).trimmed();
+
+    QJsonParseError pe;
+    QJsonDocument doc = QJsonDocument::fromJson(planJson.toUtf8(), &pe);
+
+    if (doc.isNull()) {
+        emit appendTools(
+            QString("<b>Plan JSON-Fehler:</b> %1<br><pre>%2</pre>")
+            .arg(pe.errorString().toHtmlEscaped(),
+                 planJson.left(300).toHtmlEscaped()), "error");
+
+        // JSON-Repair versuchen
+        QString repaired = repairJson(planJson);
+        if (!repaired.isEmpty()) {
+            doc = QJsonDocument::fromJson(repaired.toUtf8());
+            emit appendTools("<b>Plan JSON repariert.</b>", "system");
+        } else {
+            // Retry: Modell soll Plan nochmal ausgeben
+            ++m_planRetryCount;
+            if (m_planRetryCount > MAX_PLAN_RETRIES) {
+                emit appendTools(
+                    "<b>Plan fehlgeschlagen:</b> JSON nach Repair und Retry ungültig.", "error");
+                m_mode = AgentMode::Chat;
+                emit modeChanged(m_mode);
+                m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+                emit inputEnabled(true);
+                emit statusChanged("Plan fehlgeschlagen");
+                return;
+            }
+
+            QString errFeedback = QString(
+                "[SYSTEM: Dein <plan> Block enthielt ungültiges JSON. Fehler: %1. "
+                "Bitte sende den vollständigen <plan>...</plan> Block erneut "
+                "mit korrektem JSON. Achte auf korrekte Anführungszeichen und Kommas.]")
+                .arg(pe.errorString());
+            m_chatModel.addAssistantMessage(fullResponse);
+            m_chatModel.addToolResult("plan_json_error", errFeedback);
+            m_generating      = true;
+            m_generatedTokens = 0;
+            m_currentResponse.clear();
+            m_thinkBuffer.clear();
+            m_inThinkBlock = false;
+            emit appendChat("<b>Assistent (Plan-Korrektur):</b> ", "assistant");
+            emit statusChanged("Plan-JSON wird korrigiert...");
+            startGeneration(LlamaWorker::SamplerProfile::Tool);
+            return;
+        }
+    }
+
+    // ─── JSON valide → TaskTree aufbauen ─────────────────────────────────
+    QJsonObject root = doc.object();
+    QString goalTitle = root.value("goal").toString("Unbenanntes Ziel");
+
+    // H0-Wurzel-Knoten erstellen
+    // Analogie AVR: wie das Initialisieren des Stack-Pointers — erster Schritt
+    // bevor irgendwas anderes passiert.
+    TaskNode *goalNode = m_taskTree.createNode(
+        goalTitle, "", static_cast<int>(TaskLevel::Goal),
+        TaskScope::External, 0, nullptr);
+    goalNode->status = TaskStatus::Pending;
+
+    // Kinder rekursiv parsen
+    QJsonArray children = root.value("children").toArray();
+    int nodeCount = 1;  // goalNode zählt mit
+    for (int i = 0; i < children.size(); ++i) {
+        nodeCount += parsePlanNode(children[i].toObject(), goalNode, 1);
+    }
+
+    emit appendTools(
+        QString("<b>Plan erstellt:</b> %1 Knoten, Ziel: <i>%2</i>")
+        .arg(nodeCount).arg(goalTitle.toHtmlEscaped()), "system");
+
+    // TaskTree-Modell aktualisieren → PlannerDock zeigt neuen Baum
+    emit taskTreeUpdated();
+
+    // Plan-Approval: User muss bestätigen
+    // inputEnabled(true) damit User die Buttons klicken kann
+    emit planReady();
+    emit inputEnabled(true);
+    emit statusChanged("Plan bereit — bitte bestätigen oder ablehnen");
+}
+
+// ─── parsePlanNode ────────────────────────────────────────────────────────────
+// Rekursiver Aufbau des TaskTree aus einem JSON-Objekt.
+//
+// Pattern: Composite (GoF) — jeder Knoten kann wieder Kinder haben.
+// Rekursionstiefe entspricht der Hierarchie-Tiefe (H1, H2, H3, ...).
+//
+// Fehlende Felder werden mit Defaults gefüllt:
+//   title       → "Unbenannte Aufgabe"
+//   level       → depth (aus Rekursionstiefe)
+//   scope       → Internal
+//   description → ""
+//   dependsOn   → leer
+//
+// Warum depth statt level aus JSON?
+//   Das Modell könnte falsche Level angeben. Wir trauen der Struktur
+//   (Verschachtelung) mehr als dem expliziten level-Wert.
+//   Falls level explizit angegeben ist, bevorzugen wir es trotzdem —
+//   das Modell weiß manchmal mehr als die Struktur.
+int Agent::parsePlanNode(const QJsonObject &obj, TaskNode *parent, int depth)
+{
+    QString title = obj.value("title").toString(
+        QString("Unbenannte Aufgabe (H%1)").arg(depth));
+
+    // level: aus JSON bevorzugt, sonst aus Rekursionstiefe
+    int level = obj.contains("level")
+                ? obj.value("level").toInt(depth)
+                : depth;
+
+    TaskScope scope = TaskScope::Internal;
+    if (obj.value("scope").toString() == "external")
+        scope = TaskScope::External;
+
+    QString description = obj.value("description").toString();
+
+    // order: Position unter den Geschwistern (für Sortierung)
+    // Falls nicht im JSON: insertionIdx übernimmt die Sortierung
+    int order = obj.value("order").toInt(0);
+
+    TaskNode *node = m_taskTree.createNode(
+        title, description, level, scope, order, parent);
+
+    // dependsOn: Titel-Strings → IDs auflösen
+    // Das Modell gibt Titel an (lesbar), wir wandeln in IDs um.
+    // Auflösung jetzt ist nicht möglich (referenzierte Knoten vielleicht
+    // noch nicht erstellt) — wir speichern die Titel und lösen nach
+    // vollständigem Parsen auf. Hier erstmal überspringen.
+    // TODO: dependsOn-Auflösung nach vollständigem Parsen (zweiter Pass)
+
+    // Kinder rekursiv
+    QJsonArray children = obj.value("children").toArray();
+    int count = 1;  // dieser Knoten
+    for (int i = 0; i < children.size(); ++i)
+        count += parsePlanNode(children[i].toObject(), node, depth + 1);
+
+    return count;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PRIVATE METHODEN (unverändert aus vorheriger Version)
+// ═════════════════════════════════════════════════════════════════════════════
+
 void Agent::startGeneration(LlamaWorker::SamplerProfile profile)
 {
     QMetaObject::invokeMethod(m_worker, "generate",

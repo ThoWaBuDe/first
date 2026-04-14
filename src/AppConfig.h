@@ -13,10 +13,6 @@
 // Zwei Klassen von Parametern:
 //   Sofort wirksam  — Schwellen, Sampler-Werte, Logging → Agent übernimmt live
 //   Neustart nötig  — Modellpfad, n_ctx, Chat-Template → LlamaWorker::cleanup()+initialize()
-//
-// Verwendung:
-//   AppConfig::instance().modelPath()         // lesen
-//   AppConfig::instance().setModelPath(p);    // setzen + sofort in Datei speichern
 
 class AppConfig : public QObject {
     Q_OBJECT
@@ -104,15 +100,6 @@ public:
     void setUserSystemPrompt(const QString &v) { m_userSystemPrompt = v; save(); }
 
     // ─── Project Index ────────────────────────────────────────────────────
-    // Konfiguration für den Projekt-Index (statische Projektkarte für das LLM).
-    //
-    // sourceRoot:   LlamaQt-Quellcode — read-only, wird NICHT überwacht
-    // sandboxRoot:  ~/llamatools — wird auf Änderungen geprüft (Timestamp)
-    // cachePath:    Wo der generierte Markdown-Index gespeichert wird
-    // autoRebuild:  true = Cache automatisch neu bauen wenn Sandbox neuer ist
-    //
-    // Die MCP-Server lesen dieselben Werte direkt aus der INI via McpConfig.h
-    // (kein AppConfig-Singleton in den Server-Prozessen).
     QString indexSourceRoot() const         { return m_indexSourceRoot; }
     QString indexSandboxRoot() const        { return m_indexSandboxRoot; }
     QString indexCachePath() const          { return m_indexCachePath; }
@@ -122,6 +109,18 @@ public:
     void setIndexSandboxRoot(const QString &v) { m_indexSandboxRoot = v; save(); }
     void setIndexCachePath(const QString &v)   { m_indexCachePath = v;   save(); }
     void setIndexAutoRebuild(bool v)           { m_indexAutoRebuild = v; save(); }
+
+    // ─── TaskTree Datenbank ───────────────────────────────────────────────
+    // Pfad zur SQLite-DB für den Aufgabenbaum.
+    // Default: ~/llamatools/tasks.sqlite — im Sandbox-Verzeichnis,
+    // damit die DB mit dem Projekt zusammen liegt.
+    //
+    // Warum Sandbox und nicht ~/.cache?
+    //   - Der User hat entschieden: DB liegt im Sandbox-Verzeichnis
+    //   - Damit ist die DB pro-Sandbox und kann mit git versioniert werden
+    //   - ~/.cache wäre anonym und schwer zu finden
+    QString taskDbPath() const           { return m_taskDbPath; }
+    void setTaskDbPath(const QString &v) { m_taskDbPath = v; save(); }
 
 signals:
     void chatLoggingChanged(bool enabled);
@@ -133,7 +132,6 @@ private:
 
     QSettings m_settings;
 
-    // ─── Werte mit Defaults ───────────────────────────────────────────────
     QString m_modelPath       = "/home/thomas/ai/models/Qwen3.5-9B-Q6_K.gguf";
 
     int     m_chatTopK        = 40;
@@ -162,17 +160,18 @@ private:
     bool    m_chatLoggingEnabled = false;
     QString m_chatLogDir      = "";
 
-    // ─── Chat-Template ────────────────────────────────────────────────────
     ChatTemplate::Preset m_chatTemplatePreset   = ChatTemplate::Preset::Auto;
     QString              m_customChatTemplate   = "";
-    QString              m_detectedJinjaTemplate = "";  // nicht persistiert
+    QString              m_detectedJinjaTemplate = "";
 
-    // ─── User System-Prompt ───────────────────────────────────────────────
     QString m_userSystemPrompt = "";
 
-    // ─── Project Index ────────────────────────────────────────────────────
-    QString m_indexSourceRoot  = "";          // Default: leer → wird in load() auf
-    QString m_indexSandboxRoot = "";          // QDir::homePath() + "..." gesetzt
+    QString m_indexSourceRoot  = "";
+    QString m_indexSandboxRoot = "";
     QString m_indexCachePath   = "";
     bool    m_indexAutoRebuild = true;
+
+    // ─── TaskTree ─────────────────────────────────────────────────────────
+    // Default wird in load() gesetzt (braucht QDir::homePath() → Qt-Runtime)
+    QString m_taskDbPath = "";
 };

@@ -5,12 +5,16 @@
 #include "Agent.h"
 #include "ConfigDialog.h"
 #include "EditorDock.h"
+#include "PlannerDock.h"
 
 namespace Ui { class MainWindow; }
 
 // ─── MainWindow ───────────────────────────────────────────────────────────────
 // Pattern: View aus MVP.
 // Kennt nur Widgets und Agent. Keine Business-Logik.
+//
+// Neu: PlannerDock als QDockWidget an der linken Seite.
+// Wird initial ausgeblendet und durch Agent::modeChanged(Plan) eingeblendet.
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -18,25 +22,22 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
-    // eventFilter: Enter/Shift+Enter im inputEdit abfangen.
-    // Override von QObject::eventFilter() — muss im Header deklariert sein
-    // damit der Compiler die Methode als Override von QObject::eventFilter()
-    // erkennt und nicht als freie neue Methode.
     bool eventFilter(QObject *obj, QEvent *event) override;
 
 private slots:
-    // UI-Events
     void onSendClicked();
     void onClearToolsClicked();
     void onSettingsClicked();
 
-    // Agent → UI
     void onAppendChat(const QString &html, const QString &cssClass);
     void onAppendChatToken(const QString &text);
     void onAppendTools(const QString &html, const QString &cssClass);
     void onInputEnabled(bool enabled);
     void onStatsUpdated(int promptTokens, int generatedTokens,
                         int totalTokens,  int ctxSize);
+
+    // Modus-Änderung: PlannerDock ein-/ausblenden
+    void onModeChanged(AgentMode mode);
 
 private:
     void setupUi();
@@ -47,10 +48,8 @@ private:
 
     Ui::MainWindow *ui;
     Agent          *m_agent;
-
-    EditorDock      *m_editorDock;
-
-    // MODEL_PATH kommt jetzt aus AppConfig — nicht mehr hardcodiert hier.
+    EditorDock     *m_editorDock;
+    PlannerDock    *m_plannerDock;   // NEU
 
     static constexpr int AUTOSCROLL_THRESHOLD = 20;
 };

@@ -29,16 +29,35 @@ void MainWindow::setupUi()
 {
     ui->setupUi(this);
 
+    // ─── Tool-Dock (rechts) ───────────────────────────────────────────────
     addDockWidget(Qt::RightDockWidgetArea, ui->toolDock);
     ui->toolDock->setMinimumWidth(350);
 
+    // ─── Editor-Dock (unten) ──────────────────────────────────────────────
     m_editorDock = new EditorDock(this);
     addDockWidget(Qt::BottomDockWidgetArea, m_editorDock);
-    m_editorDock->hide();   // Standard: eingeklappt
+    m_editorDock->hide();
 
-    // EditorDock im Menü togglebar machen
+    // ─── Planner-Dock (links) ─────────────────────────────────────────────
+    // Zeigt den TaskTree + Approval-Buttons im Plan-Modus.
+    // Initial ausgeblendet — wird durch Agent::modeChanged(Plan) eingeblendet.
+    //
+    // Warum links?
+    //   - Rechts ist toolDock (Tool-Calls, Thinking)
+    //   - Unten ist editorDock (Code-Editor)
+    //   - Links ist noch frei → natürliche Position für Navigation/Plan
+    //
+    // Warum nicht tabbedDock mit toolDock?
+    //   Plan und Tool-Calls sollen gleichzeitig sichtbar sein:
+    //   User sieht links den Plan-Tree, rechts die laufenden Tool-Calls.
+    m_plannerDock = new PlannerDock(m_agent, this);
+    addDockWidget(Qt::LeftDockWidgetArea, m_plannerDock);
+    m_plannerDock->hide();   // initial ausgeblendet
+
+    // ─── Ansicht-Menü: alle Docks togglebar ───────────────────────────────
     QMenu *viewMenu = menuBar()->addMenu("&Ansicht");
     viewMenu->addAction(m_editorDock->toggleViewAction());
+    viewMenu->addAction(m_plannerDock->toggleViewAction());
     // toggleViewAction() liefert eine QAction die den Dock ein-/ausblendet.
     // Qt erstellt sie automatisch für jeden QDockWidget.
 
@@ -51,29 +70,10 @@ void MainWindow::setupUi()
         .system    { color: #888; font-style: italic; font-size: 11px; }
         b          { font-weight: 600; }
     )");
-
-    // chatView bricht bereits um (WidgetWidth ist Default) — explizit setzen
     ui->chatView->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
 
-    // ─── toolView: Word-Wrap ───────────────────────────────────────────────
-    // Problem: toolView zeigt lange JSON-Blöcke, Tool-Ergebnisse und
-    // Thinking-Text. Diese brechen ohne Word-Wrap nicht um — horizontales
-    // Scrollen ist sehr unkomfortabel.
-    //
-    // Lösung: WrapAtWordBoundaryOrAnywhere
-    //   - Bricht an Wortgrenzen um wenn möglich
-    //   - Bricht notfalls auch mitten im Wort/Token (wichtig für JSON ohne Spaces)
-    //   - Kein harter Umbruch im gespeicherten Text — nur visuell
-    //
-    // Warum nicht WrapAnywhere allein?
-    //   WrapAnywhere bricht überall, auch mitten in gut lesbaren Wörtern.
-    //   WrapAtWordBoundaryOrAnywhere ist der Kompromiss.
-    //
-    // Warum nicht CSS word-wrap:break-word?
-    //   Qt's QTextEdit rendert HTML aber ignoriert CSS word-wrap in QTextDocument.
-    //   setWordWrapMode() ist die Qt-native Lösung.
+    // ─── toolView ─────────────────────────────────────────────────────────
     ui->toolView->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-
     ui->toolView->document()->setDefaultStyleSheet(R"(
         body   { font-family: monospace; font-size: 11px; }
         .tool  { color: #188038; background: #f1f8f4;
@@ -89,17 +89,12 @@ void MainWindow::setupUi()
                  margin: 2px 0; }
     )");
 
-    // ─── inputEdit: QTextEdit statt QLineEdit ─────────────────────────────
-    // QTextEdit erlaubt Shift+Enter für Zeilenumbrüche in der Eingabe.
-    // Enter allein sendet (wird in eventFilter / setupConnections abgefangen).
-    // Feste Höhe: 3 Zeilen, wächst nicht (kein Layout-Shift).
-    ui->inputEdit->setFixedHeight(66);  // ca. 3 Zeilen bei 13px Font
+    // ─── inputEdit ────────────────────────────────────────────────────────
+    ui->inputEdit->setFixedHeight(66);
     ui->inputEdit->setPlaceholderText(
         "Nachricht eingeben... (Enter = Senden, Shift+Enter = Zeilenumbruch)");
     ui->inputEdit->setWordWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-    ui->inputEdit->setAcceptRichText(false);  // nur Plain-Text
-
-    // installEventFilter damit wir Enter/Shift+Enter abfangen
+    ui->inputEdit->setAcceptRichText(false);
     ui->inputEdit->installEventFilter(this);
 
     ui->statusLabel->setStyleSheet("color: #888; font-size: 11px;");
@@ -107,8 +102,6 @@ void MainWindow::setupUi()
         "color: #555; font-size: 11px; font-family: monospace;");
 
     // ─── Menü-Bar ─────────────────────────────────────────────────────────
-    // Einfaches Menü: nur Datei und Einstellungen.
-    // Qt erstellt die Menü-Bar automatisch als Teil von QMainWindow.
     QMenu *fileMenu = menuBar()->addMenu("&Datei");
 
     QAction *settingsAction = fileMenu->addAction("⚙ Einstellungen...");
@@ -123,30 +116,16 @@ void MainWindow::setupUi()
 }
 
 // ─── eventFilter ─────────────────────────────────────────────────────────────
-// Abfangen von Enter und Shift+Enter im inputEdit.
-//
-// Pattern: Interceptor / Decorator für Qt-Events.
-//
-// Enter ohne Modifier → Senden
-// Enter + Shift       → normaler Zeilenumbruch (QTextEdit-Default)
-// Alle anderen Keys   → normal weitergeben
-//
-// Warum eventFilter statt subclassing?
-//   Wir nutzen Qt Designer (.ui Datei) — eigene QTextEdit-Subklasse würde
-//   "promoted widget" in Designer erfordern. eventFilter ist einfacher.
 bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 {
     if (obj == ui->inputEdit && event->type() == QEvent::KeyPress) {
         QKeyEvent *key = static_cast<QKeyEvent *>(event);
         bool shiftHeld = key->modifiers() & Qt::ShiftModifier;
-
         if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
             if (!shiftHeld) {
-                // Enter ohne Shift → Senden
                 onSendClicked();
-                return true;  // Event nicht weiterleiten (kein Zeilenumbruch)
+                return true;
             }
-            // Shift+Enter → QTextEdit behandelt es normal (Zeilenumbruch)
         }
     }
     return QMainWindow::eventFilter(obj, event);
@@ -178,6 +157,12 @@ void MainWindow::setupConnections()
             this,    &MainWindow::onInputEnabled);
     connect(m_agent, &Agent::statsUpdated,
             this,    &MainWindow::onStatsUpdated);
+
+    // ─── Modus-Änderung ────────────────────────────────────────────────────
+    connect(m_agent, &Agent::modeChanged,
+            this,    &MainWindow::onModeChanged);
+
+    // ─── EditorDock ───────────────────────────────────────────────────────
     connect(m_editorDock, &EditorDock::fileSavedByUser,
             m_agent,      &Agent::onFileSavedByUser);
 }
@@ -186,20 +171,11 @@ void MainWindow::setupConnections()
 // HILFSFUNKTIONEN: Smart-Autoscroll
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── isScrolledToBottom ──────────────────────────────────────────────────────
-// Prüft ob der Scrollbar "am Ende" ist — mit AUTOSCROLL_THRESHOLD Pixel Puffer.
-//
-// Warum ein Schwellwert?
-//   Qt kann den Scrollbar-Maximum-Wert asynchron aktualisieren während
-//   Text eingefügt wird. Ein harter == Vergleich würde manchmal fälschlich
-//   "nicht am Ende" melden. 20px Puffer fängt das ab.
 bool MainWindow::isScrolledToBottom(QScrollBar *sb) const
 {
     return (sb->maximum() - sb->value()) <= AUTOSCROLL_THRESHOLD;
 }
 
-// ─── scrollToBottomIfNeeded ──────────────────────────────────────────────────
-// Scrollt ans Ende — aber nur wenn der Nutzer nicht aktiv hochgescrollt hat.
 void MainWindow::scrollToBottomIfNeeded(QScrollBar *sb)
 {
     if (isScrolledToBottom(sb))
@@ -212,7 +188,6 @@ void MainWindow::scrollToBottomIfNeeded(QScrollBar *sb)
 
 void MainWindow::onSendClicked()
 {
-    // toPlainText() weil inputEdit kein RichText akzeptiert
     QString text = ui->inputEdit->toPlainText().trimmed();
     if (text.isEmpty()) return;
     ui->inputEdit->clear();
@@ -224,64 +199,68 @@ void MainWindow::onClearToolsClicked()
     ui->toolView->clear();
 }
 
+// ─── onModeChanged ───────────────────────────────────────────────────────────
+// Reagiert auf Modus-Wechsel des Agent.
+// Plan-Modus → PlannerDock einblenden
+// Chat-Modus → PlannerDock ausblenden (optional: User kann es offen lassen)
+//
+// Warum nur einblenden, nicht erzwungen ausblenden?
+//   User könnte den Plan-Tree auch nach der Approval noch sehen wollen
+//   (z.B. um den bestätigten Plan nachzulesen).
+//   Wir blenden nur im Plan-Modus automatisch ein.
+void MainWindow::onModeChanged(AgentMode mode)
+{
+    if (mode == AgentMode::Plan) {
+        m_plannerDock->show();
+        m_plannerDock->raise();
+    }
+    // Bei Chat/Execute: Dock bleibt wie es ist (User entscheidet)
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // SLOTS: Agent → UI Darstellung
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── onAppendChat ────────────────────────────────────────────────────────────
 void MainWindow::onAppendChat(const QString &html, const QString &cssClass)
 {
     QScrollBar *sb = ui->chatView->verticalScrollBar();
     bool wasAtBottom = isScrolledToBottom(sb);
-
     ui->chatView->append(
         QString(R"(<p class="%1">%2</p>)").arg(cssClass, html));
-
-    // Smart-Autoscroll: nur wenn vorher am Ende
     if (wasAtBottom)
         sb->setValue(sb->maximum());
 }
 
-// ─── onAppendChatToken ───────────────────────────────────────────────────────
-// QTextCursor::insertText() — kein neuer Absatz, in laufenden Block
 void MainWindow::onAppendChatToken(const QString &text)
 {
     QScrollBar *sb = ui->chatView->verticalScrollBar();
     bool wasAtBottom = isScrolledToBottom(sb);
-
     QTextCursor cursor = ui->chatView->textCursor();
     cursor.movePosition(QTextCursor::End);
     cursor.insertText(text);
-
     if (wasAtBottom)
         sb->setValue(sb->maximum());
 }
 
-// ─── onAppendTools ───────────────────────────────────────────────────────────
 void MainWindow::onAppendTools(const QString &html, const QString &cssClass)
 {
     QScrollBar *sb = ui->toolView->verticalScrollBar();
     bool wasAtBottom = isScrolledToBottom(sb);
-
     ui->toolView->append(
         QString(R"(<p class="%1">%2</p>)").arg(cssClass, html));
-
     if (wasAtBottom)
         sb->setValue(sb->maximum());
 }
 
-// ─── onInputEnabled ──────────────────────────────────────────────────────────
 void MainWindow::onInputEnabled(bool enabled)
 {
     ui->inputEdit->setEnabled(enabled);
     ui->sendButton->setEnabled(enabled);
     ui->stopButton->setEnabled(!enabled);
-
     if (enabled)
         ui->inputEdit->setFocus();
 }
 
-// ─── onStatsUpdated ──────────────────────────────────────────────────────────
 void MainWindow::onStatsUpdated(int promptTokens, int generatedTokens,
                                  int totalTokens,  int ctxSize)
 {
@@ -297,34 +276,21 @@ void MainWindow::onStatsUpdated(int promptTokens, int generatedTokens,
         .arg(promptTokens).arg(generatedTokens)
         .arg(used).arg(ctxSize).arg(pct)
         .arg(totalTokens));
-
     ui->statsLabel->setStyleSheet(
         QString("color: %1; font-size: 11px; font-family: monospace;")
         .arg(color));
 }
 
-// ─── onSettingsClicked ───────────────────────────────────────────────────────
-// Öffnet den Config-Dialog modal.
-// Nach OK werden sofort-wirksame Änderungen weitergegeben:
-//   - Sampler geändert → LlamaWorker::rebuildSamplers() im Worker-Thread
-//   - Logging geändert → Agent::m_logger aktivieren/deaktivieren
-// Neustart-nötige Änderungen (Modellpfad, n_ctx) zeigt der Dialog selbst
-// als Hinweis — MainWindow muss nichts extra tun.
 void MainWindow::onSettingsClicked()
 {
     ConfigDialog dlg(this);
 
-    // Sampler-Änderungen → Worker-Thread neu bauen
     connect(&dlg, &ConfigDialog::samplersChanged, this, [this]() {
-        // invokeMethod weil rebuildSamplers im Worker-Thread laufen muss
         QMetaObject::invokeMethod(m_agent->worker(), "rebuildSamplers",
                                   Qt::QueuedConnection);
         emit m_agent->appendTools(
             "Sampler neu gebaut mit aktuellen Einstellungen.", "system");
     });
-
-    // Logging-Änderungen → direkt wirksam via AppConfig Signal
-    // (ChatLogger ist bereits mit AppConfig::chatLoggingChanged verbunden)
 
     dlg.exec();
 }

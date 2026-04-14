@@ -17,7 +17,6 @@ AppConfig::AppConfig(QObject *parent)
     load();
 }
 
-// ─── load ─────────────────────────────────────────────────────────────────────
 void AppConfig::load()
 {
     m_settings.beginGroup("Model");
@@ -64,22 +63,30 @@ void AppConfig::load()
     m_chatLogDir         = m_settings.value("chat_log_dir", m_chatLogDir).toString();
     m_settings.endGroup();
 
-    // ─── ProjectIndex ─────────────────────────────────────────────────────────
-    // Defaults werden hier gesetzt (nach QDir::homePath() Auflösung),
-    // nicht als Membervariablen-Initialisierer — homePath() braucht Qt-Runtime.
     const QString home = QDir::homePath();
+
     m_settings.beginGroup("ProjectIndex");
-    m_indexSourceRoot  = ""; //m_settings.value("source_root",
-                            //home + "/ai/LlamaQT").toString();
+    m_indexSourceRoot  = "";
     m_indexSandboxRoot = m_settings.value("sandbox_root",
                             home + "/llamatools").toString();
     m_indexCachePath   = m_settings.value("cache_path",
                             home + "/.cache/llamaqt/index.md").toString();
     m_indexAutoRebuild = m_settings.value("auto_rebuild", true).toBool();
     m_settings.endGroup();
+
+    // ─── TaskTree ─────────────────────────────────────────────────────────
+    // Default: ~/llamatools/tasks.sqlite
+    // Liegt im Sandbox-Verzeichnis — pro-Projekt, sichtbar, versionierbar.
+    //
+    // Warum hier und nicht als Membervariablen-Initialisierer?
+    //   QDir::homePath() braucht Qt-Runtime — Membervariablen werden vor
+    //   dem QApplication-Konstruktor initialisiert. Daher hier in load().
+    m_settings.beginGroup("TaskTree");
+    m_taskDbPath = m_settings.value("db_path",
+                       home + "/llamatools/tasks.sqlite").toString();
+    m_settings.endGroup();
 }
 
-// ─── save ─────────────────────────────────────────────────────────────────────
 void AppConfig::save()
 {
     m_settings.beginGroup("Model");
@@ -124,12 +131,16 @@ void AppConfig::save()
     m_settings.setValue("chat_log_dir", m_chatLogDir);
     m_settings.endGroup();
 
-    // ─── ProjectIndex ─────────────────────────────────────────────────────────
     m_settings.beginGroup("ProjectIndex");
     m_settings.setValue("source_root",  m_indexSourceRoot);
     m_settings.setValue("sandbox_root", m_indexSandboxRoot);
     m_settings.setValue("cache_path",   m_indexCachePath);
     m_settings.setValue("auto_rebuild", m_indexAutoRebuild);
+    m_settings.endGroup();
+
+    // ─── TaskTree ─────────────────────────────────────────────────────────
+    m_settings.beginGroup("TaskTree");
+    m_settings.setValue("db_path", m_taskDbPath);
     m_settings.endGroup();
 
     m_settings.sync();
