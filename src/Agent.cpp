@@ -7,12 +7,6 @@
 #include <QFileInfo>
 #include <QDir>
 
-// ─── Whitelist: erlaubte Tools im Plan-Modus ──────────────────────────────────
-// Nur Lese-Tools. Schreib-Tools (write_file, str_replace, cmake_build, ...)
-// sind im Plan-Modus verboten — das Modell soll nur analysieren, nicht ändern.
-//
-// Analogie AVR: wie ein Read-only-Segment im Flash — zur Compile-Zeit fest,
-// kann nicht versehentlich überschrieben werden.
 const QStringList Agent::PLAN_ALLOWED_TOOLS = {
     "read_file",
     "list_dir",
@@ -47,7 +41,6 @@ Agent::Agent(const QString &modelPath, QObject *parent)
     connect(m_worker, &LlamaWorker::errorOccurred,   this, &Agent::onError);
     connect(m_worker, &LlamaWorker::statsUpdate,     this, &Agent::onStatsUpdate);
     connect(&m_workerThread, &QThread::finished,     m_worker, &QObject::deleteLater);
-
     connect(m_worker, &LlamaWorker::chatTemplateDetected,
             this,     &Agent::onChatTemplateDetected);
 
@@ -76,9 +69,6 @@ void Agent::start()
     connect(&cfg, &AppConfig::chatLoggingChanged,
             &m_logger, &ChatLogger::setEnabled);
 
-    // ─── TaskTree DB-Pfad setzen ──────────────────────────────────────────
-    // Das Verzeichnis muss existieren bevor SQLite die DB anlegt.
-    // QDir::mkpath() ist idempotent (kein Fehler wenn Verzeichnis schon da).
     QString dbPath = cfg.taskDbPath();
     QDir().mkpath(QFileInfo(dbPath).absolutePath());
     m_taskTree.setDbPath(dbPath);
@@ -180,12 +170,8 @@ void Agent::onUserMessage(const QString &text)
                 return;
             }
 
-            // ─── Plan-Modus Einstieg ───────────────────────────────────────
-            // Marker: "__PLAN__:<Auftrag>"
-            // Analogie AVR: wie eine ISR-Weiche — dieser Pfad verlässt den
-            // normalen Hauptpfad und startet den Plan-FSM.
             if (result.prompt.startsWith("__PLAN__:")) {
-                QString auftrag = result.prompt.mid(9);  // "__PLAN__:" = 9 Zeichen
+                QString auftrag = result.prompt.mid(9);
                 emit appendChat(
                     QString("<b>Plan-Modus:</b> %1").arg(text.toHtmlEscaped()), "user");
                 startPlan(auftrag);
@@ -238,7 +224,6 @@ void Agent::onStop()
     if (m_worker) m_worker->stopGeneration();
     m_toolFailCount.clear();
 
-    // Bei Stop im Plan-Modus: zurück zu Chat
     if (m_mode == AgentMode::Plan) {
         m_mode = AgentMode::Chat;
         emit modeChanged(m_mode);
@@ -291,16 +276,10 @@ void Agent::onFileSavedByUser(const QString &filePath)
     m_logger.logSystem(QString("User hat %1 manuell gespeichert.").arg(filePath));
 }
 
-// ─── onPlanApproved ──────────────────────────────────────────────────────────
-// User hat den Plan bestätigt.
-// Speichert den TaskTree in SQLite.
-// Execute-Modus wird in einer späteren Session implementiert —
-// vorerst zurück zu Chat mit einer Zusammenfassung.
 void Agent::onPlanApproved()
 {
     if (m_mode != AgentMode::Plan) return;
 
-    // TaskTree persistieren
     m_taskTree.save();
     emit appendTools(
         QString("<b>Plan gespeichert:</b> %1 Knoten in <code>%2</code>")
@@ -308,8 +287,7 @@ void Agent::onPlanApproved()
         .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
         "system");
 
-    // Vorerst zurück zu Chat
-    // TODO (nächste Session): m_mode = AgentMode::Execute; startExecute();
+    // TODO: m_mode = AgentMode::Execute; startExecute();
     m_mode = AgentMode::Chat;
     emit modeChanged(m_mode);
     m_chatModel.setSystemPrompt(buildFullSystemPrompt());
@@ -321,8 +299,6 @@ void Agent::onPlanApproved()
     emit statusChanged("Plan gespeichert — bereit");
 }
 
-// ─── onPlanRejected ──────────────────────────────────────────────────────────
-// User hat den Plan abgelehnt — einfach zurück zu Chat.
 void Agent::onPlanRejected()
 {
     if (m_mode != AgentMode::Plan) return;
@@ -402,13 +378,6 @@ void Agent::onTokenReceived(const QString &token)
     if (m_generatedTokens % 10 == 0) emitStats();
 }
 
-// ─── onGenerationDone ────────────────────────────────────────────────────────
-// Zentrale Weiche: Chat-Modus vs. Plan-Modus.
-//
-// Im Plan-Modus prüfen wir zuerst ob ein <plan>...</plan> Block da ist.
-// Falls ja → handlePlanJson(). Falls nein → handlePlanToolCall() wie normal.
-//
-// Im Chat-Modus: unveränderte Logik.
 void Agent::onGenerationDone(const QString &fullResponse)
 {
     m_generating = false;
@@ -418,18 +387,15 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     // ─── Plan-Modus ───────────────────────────────────────────────────────
     if (m_mode == AgentMode::Plan) {
-        // Modell hat <plan>...</plan> ausgegeben → Plan parsen
         if (fullResponse.contains("<plan>") && fullResponse.contains("</plan>")) {
             handlePlanJson(fullResponse, mySession);
             return;
         }
-        // Modell hat einen Tool-Call gemacht → im Plan-Modus nur Lese-Tools
         if (fullResponse.contains("<tool_call>") && fullResponse.contains("</tool_call>")) {
             m_chatModel.addAssistantMessage(fullResponse);
             handlePlanToolCall(fullResponse, mySession);
             return;
         }
-        // Unvollständiger Tool-Call → Continuation (wie Chat-Modus)
         if (fullResponse.contains("<tool_call>") && !fullResponse.contains("</tool_call>")) {
             ++m_continuationCount;
             if (m_continuationCount > MAX_CONTINUATIONS) {
@@ -449,12 +415,8 @@ void Agent::onGenerationDone(const QString &fullResponse)
             startGeneration(LlamaWorker::SamplerProfile::Tool);
             return;
         }
-        // Kein Tool-Call, kein Plan → Modell antwortet in Prosa.
-        // Das kann passieren wenn Qwen erst erklärt was es tun will.
-        // Wir fügen es als Assistent-Nachricht ein und warten auf nächsten Schritt.
         m_chatModel.addAssistantMessage(fullResponse);
         emit appendChat(fullResponse.toHtmlEscaped(), "assistant");
-        // Modell soll weitermachen — nochmal generieren ohne neuen User-Input
         m_generating      = true;
         m_generatedTokens = 0;
         m_currentResponse.clear();
@@ -465,7 +427,7 @@ void Agent::onGenerationDone(const QString &fullResponse)
         return;
     }
 
-    // ─── Chat-Modus (unverändert) ──────────────────────────────────────────
+    // ─── Chat-Modus ───────────────────────────────────────────────────────
     if (m_summarizing) {
         m_summarizing = false;
         m_chatModel.clear();
@@ -526,34 +488,19 @@ void Agent::onGenerationDone(const QString &fullResponse)
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ─── startPlan ───────────────────────────────────────────────────────────────
-// Wechselt in Plan-Modus, setzt den Planner-System-Prompt und startet
-// die erste Generierung.
-//
-// Ablauf:
-//   1. m_mode = Plan
-//   2. Alten TaskTree löschen (frischer Start)
-//   3. ChatModel komplett neu aufsetzen mit Planner-System-Prompt
-//   4. Erste User-Message = der Auftrag
-//   5. startGeneration(Chat) — Chat-Sampler weil freie Analyse
 void Agent::startPlan(const QString &auftrag)
 {
     m_mode = AgentMode::Plan;
     emit modeChanged(m_mode);
 
-    // Alten Tree verwerfen — jeder /plan-Aufruf startet frisch.
-    // Gespeicherte DB bleibt erhalten (wird bei Bestätigung überschrieben).
-    // Analogie AVR: wie ein Buffer-Reset vor neuem DMA-Transfer.
-    // Wir löschen den RAM-Baum indem wir ein neues TaskTree-Objekt erstellen
-    // ist nicht möglich da TaskTree kein clear() hat — wir rufen Nodes einzeln ab.
-    // Pragmatisch: Wir setzen nur m_taskTree neu — dafür brauchen wir
-    // move-assignment. TaskTree hat keinen. Wir geben einen klaren Kommentar
-    // und überlassen das Löschen dem Destruktor wenn nötig.
-    // TODO: TaskTree::clear() implementieren wenn Execute-Modus kommt.
+    // RAM-Tree leeren — jeder /plan-Aufruf startet frisch.
+    // DB bleibt erhalten (wird bei Bestätigung überschrieben).
+    // Analogie AVR: Buffer-Reset vor neuem DMA-Transfer.
+    m_taskTree.clear();
 
-    m_planRetryCount = 0;
+    m_planRetryCount    = 0;
     m_continuationCount = 0;
 
-    // Frisches ChatModel für den Plan — kein alter Kontext
     m_chatModel.clear();
     m_chatModel.setSystemPrompt(buildPlannerSystemPrompt(auftrag));
 
@@ -563,7 +510,6 @@ void Agent::startPlan(const QString &auftrag)
     m_generatedTokens = 0;
     m_generating      = true;
 
-    // Auftrag als erste User-Message
     m_chatModel.addUserMessage(
         QString("Bitte analysiere das Projekt und erstelle einen Plan für: %1").arg(auftrag));
 
@@ -579,13 +525,6 @@ void Agent::startPlan(const QString &auftrag)
 }
 
 // ─── buildPlannerSystemPrompt ────────────────────────────────────────────────
-// Ersatz für die Methode in Agent.cpp.
-// Änderungen gegenüber vorheriger Version:
-//   - H3-Regel erklärt: Implementierungsschritte → eigene children[]
-//   - Beispiel-JSON zeigt H3-Knoten explizit
-//   - scope-Semantik klarer beschrieben
-//   - dependsOn: Beispiel mit Klasse→Methode Abhängigkeit
-
 QString Agent::buildPlannerSystemPrompt(const QString &auftrag) const
 {
     Q_UNUSED(auftrag)
@@ -617,67 +556,49 @@ QString Agent::buildPlannerSystemPrompt(const QString &auftrag) const
         "\n"
         "HIERARCHIE-REGELN:\n"
         "level 0 (H0) -- Gesamtziel (genau 1x, die Wurzel)\n"
-        "level 1 (H1) -- Dateigruppe oder Modul (z.B. 'Core Game Logic', 'UI Layer')\n"
-        "level 2 (H2) -- Einzelne Datei/Klasse (z.B. 'GameEngine.h', 'GameEngine.cpp')\n"
+        "level 1 (H1) -- Dateigruppe oder Modul\n"
+        "level 2 (H2) -- Einzelne Datei/Klasse\n"
         "level 3 (H3) -- Implementierungsschritt innerhalb einer Datei\n"
         "level 4+ (H4+) -- Feinere Details wenn noetig\n"
         "\n"
-        "H3-REGEL (wichtig!):\n"
+        "H3-REGEL:\n"
         "  Wenn ein H2-Knoten Implementierungsschritte enthaelt\n"
         "  (Methoden, Algorithmen, Logik) -- gib diese als children[] mit level=3 aus.\n"
         "  Reine Interface-Dateien (.h ohne Implementierung) duerfen Blatt auf H2 bleiben.\n"
-        "  Beispiel: 'GameEngine.h' -> H2-Blatt (nur Deklarationen)\n"
-        "            'GameEngine.cpp' -> H2 mit H3-children (Methodenimplementierungen)\n"
         "\n"
         "scope-BEDEUTUNG:\n"
-        "  external -- oeffentliches Interface (public Methoden, .h Deklarationen)\n"
-        "  internal -- Implementierungsdetail (private, .cpp Definitionen, Algorithmen)\n"
+        "  external -- oeffentliches Interface (public, .h Deklarationen)\n"
+        "  internal -- Implementierungsdetail (private, .cpp Definitionen)\n"
         "\n"
         "dependsOn-VERWENDUNG:\n"
         "  Liste von Titeln anderer Knoten auf die dieser Knoten angewiesen ist.\n"
-        "  Beispiel: Eine Methode haengt von der Klasse ab die sie aufruft.\n"
-        "  Sinn: Der Execute-Agent bekommt das Interface der Abhaengigkeit als Kontext.\n"
+        "  Beispiel: 'GameState.cpp' haengt von 'GameState.h' ab.\n"
         "\n"
         "PLAN-FORMAT:\n"
         "<plan>\n"
         "{\n"
-        "  \"goal\": \"TicTacToe Qt6 App\",\n"
+        "  \"goal\": \"Kurztitel\",\n"
         "  \"children\": [\n"
         "    {\n"
-        "      \"title\": \"Core Logic\",\n"
+        "      \"title\": \"H1-Gruppe\",\n"
         "      \"level\": 1,\n"
         "      \"scope\": \"external\",\n"
-        "      \"description\": \"Spiellogik getrennt von UI\",\n"
+        "      \"description\": \"Was hier zu tun ist.\",\n"
+        "      \"dependsOn\": [],\n"
         "      \"children\": [\n"
-        "        {\n"
-        "          \"title\": \"GameState.h\",\n"
-        "          \"level\": 2,\n"
-        "          \"scope\": \"external\",\n"
-        "          \"description\": \"class GameState: board, currentPlayer, makeMove(), checkWin()\",\n"
-        "          \"dependsOn\": [],\n"
-        "          \"children\": []\n"
-        "        },\n"
         "        {\n"
         "          \"title\": \"GameState.cpp\",\n"
         "          \"level\": 2,\n"
         "          \"scope\": \"internal\",\n"
-        "          \"description\": \"Implementierung aller GameState-Methoden\",\n"
+        "          \"description\": \"Implementierung aller Methoden\",\n"
         "          \"dependsOn\": [\"GameState.h\"],\n"
         "          \"children\": [\n"
         "            {\n"
         "              \"title\": \"makeMove() implementieren\",\n"
         "              \"level\": 3,\n"
         "              \"scope\": \"internal\",\n"
-        "              \"description\": \"Prueft Gueltigkeit (board leer?), setzt Feld, wechselt Spieler, ruft checkWin()\",\n"
+        "              \"description\": \"Prueft Gueltigkeit, setzt Feld, wechselt Spieler\",\n"
         "              \"dependsOn\": [\"GameState.h\"],\n"
-        "              \"children\": []\n"
-        "            },\n"
-        "            {\n"
-        "              \"title\": \"checkWin() implementieren\",\n"
-        "              \"level\": 3,\n"
-        "              \"scope\": \"internal\",\n"
-        "              \"description\": \"Prueft alle 8 Gewinnlinien (3 Zeilen, 3 Spalten, 2 Diagonalen)\",\n"
-        "              \"dependsOn\": [],\n"
         "              \"children\": []\n"
         "            }\n"
         "          ]\n"
@@ -690,24 +611,15 @@ QString Agent::buildPlannerSystemPrompt(const QString &auftrag) const
         "\n"
         "REGELN:\n"
         "- Jeder Knoten hat: title, level, scope, description, dependsOn, children\n"
-        "- dependsOn: Liste von Titeln (Strings), kein leeres Weglassen sondern []\n"
-        "- children: [] wenn Blatt, sonst Array mit Kindknoten\n"
+        "- dependsOn: [] wenn keine Abhaengigkeiten\n"
+        "- children: [] wenn Blatt\n"
         "- Keine Prosa nach </plan>\n"
         "\n"
         "Antworte auf Deutsch."
-        );
+    );
 }
 
-
-
 // ─── handlePlanToolCall ───────────────────────────────────────────────────────
-// Wie handleToolCall() im Chat-Modus, aber mit Whitelist.
-//
-// Schreib-Tools → Fehlermeldung ans Modell (kein Absturz, kein Modus-Wechsel).
-// Das Modell bekommt: "[SYSTEM: Tool 'write_file' ist im Plan-Modus verboten...]"
-// und soll dann einen Lese-Tool oder den <plan> Block verwenden.
-//
-// Deadlock-Schutz greift wie im Chat-Modus (gleicher m_toolFailCount).
 void Agent::handlePlanToolCall(const QString &fullResponse, uint32_t sessionId)
 {
     int start     = fullResponse.indexOf("<tool_call>") + 11;
@@ -746,15 +658,10 @@ void Agent::handlePlanToolCall(const QString &fullResponse, uint32_t sessionId)
                                .toJson(QJsonDocument::Indented)).toHtmlEscaped()),
         "tool");
 
-    // ─── Whitelist-Prüfung ────────────────────────────────────────────────
-    // Schreib-Tools sind im Plan-Modus verboten.
-    // Analogie AVR: wie ein Schreibschutz-Register — Zugriff wird blockiert,
-    // Fehler wird gemeldet, kein Absturz.
     if (!PLAN_ALLOWED_TOOLS.contains(toolName)) {
         QString errMsg = QString(
             "[SYSTEM: Tool '%1' ist im Plan-Modus VERBOTEN. "
-            "Im Plan-Modus darf nur gelesen werden (read_file, list_dir, get_symbol, ...). "
-            "Erstelle stattdessen den <plan>...</plan> Block wenn du genug analysiert hast.]")
+            "Nur Lese-Tools erlaubt. Erstelle den <plan>...</plan> Block.]")
             .arg(toolName);
         emit appendTools(
             QString("Plan-Whitelist: <b>%1</b> verboten.").arg(toolName.toHtmlEscaped()),
@@ -770,7 +677,6 @@ void Agent::handlePlanToolCall(const QString &fullResponse, uint32_t sessionId)
         return;
     }
 
-    // ─── Erlaubtes Tool ausführen ─────────────────────────────────────────
     if (!m_mcp.containsTool(toolName)) {
         m_chatModel.addToolResult(toolName,
             QString("Fehler: Tool '%1' nicht verfügbar.").arg(toolName));
@@ -790,7 +696,6 @@ void Agent::handlePlanToolCall(const QString &fullResponse, uint32_t sessionId)
             QString toolResult = error.isEmpty() ? result : ("Fehler: " + error);
             bool    isErr      = !error.isEmpty();
 
-            // Kürzen wenn zu lang
             if (!isErr && toolResult.length() > AppConfig::instance().maxToolResultChars()) {
                 int maxChars = AppConfig::instance().maxToolResultChars();
                 int cut = toolResult.lastIndexOf('\n', maxChars);
@@ -840,19 +745,9 @@ void Agent::handlePlanToolCall(const QString &fullResponse, uint32_t sessionId)
 }
 
 // ─── handlePlanJson ───────────────────────────────────────────────────────────
-// Parst den <plan>...</plan> Block und baut m_taskTree auf.
-//
-// Fehlerbehandlung:
-//   1. Versuch: JSON direkt parsen
-//   2. Versuch: repairJson() + nochmal parsen
-//   3. Falls noch Fehler: Retry-Generierung (max MAX_PLAN_RETRIES = 1)
-//   4. Nach Retry-Erschöpfung: Fehler, zurück zu Chat
-//
-// Bei Erfolg: emit planReady() → PlannerDock zeigt Tree + Buttons.
 void Agent::handlePlanJson(const QString &fullResponse, uint32_t sessionId)
 {
-    // JSON aus <plan>...</plan> extrahieren
-    int planStart = fullResponse.indexOf("<plan>") + 6;  // "<plan>" = 6 Zeichen
+    int planStart = fullResponse.indexOf("<plan>") + 6;
     int planEnd   = fullResponse.indexOf("</plan>", planStart);
     QString planJson = fullResponse.mid(planStart, planEnd - planStart).trimmed();
 
@@ -865,13 +760,11 @@ void Agent::handlePlanJson(const QString &fullResponse, uint32_t sessionId)
             .arg(pe.errorString().toHtmlEscaped(),
                  planJson.left(300).toHtmlEscaped()), "error");
 
-        // JSON-Repair versuchen
         QString repaired = repairJson(planJson);
         if (!repaired.isEmpty()) {
             doc = QJsonDocument::fromJson(repaired.toUtf8());
             emit appendTools("<b>Plan JSON repariert.</b>", "system");
         } else {
-            // Retry: Modell soll Plan nochmal ausgeben
             ++m_planRetryCount;
             if (m_planRetryCount > MAX_PLAN_RETRIES) {
                 emit appendTools(
@@ -887,8 +780,7 @@ void Agent::handlePlanJson(const QString &fullResponse, uint32_t sessionId)
             QString errFeedback = QString(
                 "[SYSTEM: Dein <plan> Block enthielt ungültiges JSON. Fehler: %1. "
                 "Bitte sende den vollständigen <plan>...</plan> Block erneut "
-                "mit korrektem JSON. Achte auf korrekte Anführungszeichen und Kommas.]")
-                .arg(pe.errorString());
+                "mit korrektem JSON.]").arg(pe.errorString());
             m_chatModel.addAssistantMessage(fullResponse);
             m_chatModel.addToolResult("plan_json_error", errFeedback);
             m_generating      = true;
@@ -903,34 +795,69 @@ void Agent::handlePlanJson(const QString &fullResponse, uint32_t sessionId)
         }
     }
 
-    // ─── JSON valide → TaskTree aufbauen ─────────────────────────────────
+    // ── JSON valide → TaskTree aufbauen ───────────────────────────────────
     QJsonObject root = doc.object();
     QString goalTitle = root.value("goal").toString("Unbenanntes Ziel");
 
-    // H0-Wurzel-Knoten erstellen
-    // Analogie AVR: wie das Initialisieren des Stack-Pointers — erster Schritt
-    // bevor irgendwas anderes passiert.
     TaskNode *goalNode = m_taskTree.createNode(
         goalTitle, "", static_cast<int>(TaskLevel::Goal),
         TaskScope::External, 0, nullptr);
     goalNode->status = TaskStatus::Pending;
 
-    // Kinder rekursiv parsen
+    // ── Erster Pass: Knoten aufbauen ──────────────────────────────────────
+    // titleToId   — Titel → Node-ID (für zweiten Pass)
+    // pendingDeps — Node-ID → Titel-Liste (unaufgelöste dependsOn)
+    //
+    // Analogie AVR: wie ein Assembler-erster-Pass der Symboltabelle aufbaut,
+    // bevor im zweiten Pass forward references aufgelöst werden.
+    QHash<QString, qint64>     titleToId;
+    QHash<qint64, QStringList> pendingDeps;
+
+    // Wurzel-Knoten ebenfalls in titleToId eintragen
+    titleToId.insert(goalTitle, goalNode->id);
+
     QJsonArray children = root.value("children").toArray();
-    int nodeCount = 1;  // goalNode zählt mit
-    for (int i = 0; i < children.size(); ++i) {
-        nodeCount += parsePlanNode(children[i].toObject(), goalNode, 1);
+    int nodeCount = 1;
+    for (int i = 0; i < children.size(); ++i)
+        nodeCount += parsePlanNode(children[i].toObject(), goalNode, 1,
+                                   titleToId, pendingDeps);
+
+    // ── Zweiter Pass: dependsOn-Titel → Node-IDs auflösen ────────────────
+    // Jetzt sind alle Knoten erstellt und titleToId vollständig befüllt.
+    // Analogie AVR: Linker-zweiter-Pass — alle Symbole sind bekannt,
+    // forward references können aufgelöst werden.
+    int resolvedDeps   = 0;
+    int unresolvedDeps = 0;
+    for (auto it = pendingDeps.constBegin(); it != pendingDeps.constEnd(); ++it) {
+        TaskNode *node = m_taskTree.findById(it.key());
+        if (!node) continue;
+
+        for (const QString &depTitle : it.value()) {
+            qint64 depId = titleToId.value(depTitle, -1);
+            if (depId >= 0) {
+                m_taskTree.addDependency(node, m_taskTree.findById(depId));
+                ++resolvedDeps;
+            } else {
+                ++unresolvedDeps;
+                emit appendTools(
+                    QString("<b>dependsOn nicht aufgelöst:</b> '%1' → '%2'")
+                    .arg(node->title.toHtmlEscaped(), depTitle.toHtmlEscaped()),
+                    "system");
+            }
+        }
+    }
+
+    if (resolvedDeps > 0 || unresolvedDeps > 0) {
+        emit appendTools(
+            QString("<b>Abhängigkeiten:</b> %1 aufgelöst, %2 nicht gefunden.")
+            .arg(resolvedDeps).arg(unresolvedDeps), "system");
     }
 
     emit appendTools(
         QString("<b>Plan erstellt:</b> %1 Knoten, Ziel: <i>%2</i>")
         .arg(nodeCount).arg(goalTitle.toHtmlEscaped()), "system");
 
-    // TaskTree-Modell aktualisieren → PlannerDock zeigt neuen Baum
     emit taskTreeUpdated();
-
-    // Plan-Approval: User muss bestätigen
-    // inputEnabled(true) damit User die Buttons klicken kann
     emit planReady();
     emit inputEnabled(true);
     emit statusChanged("Plan bereit — bitte bestätigen oder ablehnen");
@@ -938,28 +865,18 @@ void Agent::handlePlanJson(const QString &fullResponse, uint32_t sessionId)
 
 // ─── parsePlanNode ────────────────────────────────────────────────────────────
 // Rekursiver Aufbau des TaskTree aus einem JSON-Objekt.
+// Pattern: Composite (GoF).
 //
-// Pattern: Composite (GoF) — jeder Knoten kann wieder Kinder haben.
-// Rekursionstiefe entspricht der Hierarchie-Tiefe (H1, H2, H3, ...).
-//
-// Fehlende Felder werden mit Defaults gefüllt:
-//   title       → "Unbenannte Aufgabe"
-//   level       → depth (aus Rekursionstiefe)
-//   scope       → Internal
-//   description → ""
-//   dependsOn   → leer
-//
-// Warum depth statt level aus JSON?
-//   Das Modell könnte falsche Level angeben. Wir trauen der Struktur
-//   (Verschachtelung) mehr als dem expliziten level-Wert.
-//   Falls level explizit angegeben ist, bevorzugen wir es trotzdem —
-//   das Modell weiß manchmal mehr als die Struktur.
-int Agent::parsePlanNode(const QJsonObject &obj, TaskNode *parent, int depth)
+// Neu: titleToId und pendingDeps für dependsOn-Auflösung im zweiten Pass.
+// Der Knoten registriert seinen Titel in titleToId und seine dependsOn-Titel
+// in pendingDeps — handlePlanJson() löst sie nach vollständigem Parsen auf.
+int Agent::parsePlanNode(const QJsonObject &obj, TaskNode *parent, int depth,
+                          QHash<QString, qint64> &titleToId,
+                          QHash<qint64, QStringList> &pendingDeps)
 {
     QString title = obj.value("title").toString(
         QString("Unbenannte Aufgabe (H%1)").arg(depth));
 
-    // level: aus JSON bevorzugt, sonst aus Rekursionstiefe
     int level = obj.contains("level")
                 ? obj.value("level").toInt(depth)
                 : depth;
@@ -969,32 +886,36 @@ int Agent::parsePlanNode(const QJsonObject &obj, TaskNode *parent, int depth)
         scope = TaskScope::External;
 
     QString description = obj.value("description").toString();
-
-    // order: Position unter den Geschwistern (für Sortierung)
-    // Falls nicht im JSON: insertionIdx übernimmt die Sortierung
     int order = obj.value("order").toInt(0);
 
     TaskNode *node = m_taskTree.createNode(
         title, description, level, scope, order, parent);
 
-    // dependsOn: Titel-Strings → IDs auflösen
-    // Das Modell gibt Titel an (lesbar), wir wandeln in IDs um.
-    // Auflösung jetzt ist nicht möglich (referenzierte Knoten vielleicht
-    // noch nicht erstellt) — wir speichern die Titel und lösen nach
-    // vollständigem Parsen auf. Hier erstmal überspringen.
-    // TODO: dependsOn-Auflösung nach vollständigem Parsen (zweiter Pass)
+    // Titel → ID registrieren (erster Treffer gewinnt bei Kollision)
+    if (!titleToId.contains(title))
+        titleToId.insert(title, node->id);
+
+    // dependsOn-Titel für zweiten Pass merken
+    QJsonArray deps = obj.value("dependsOn").toArray();
+    if (!deps.isEmpty()) {
+        QStringList depTitles;
+        for (const QJsonValue &v : deps)
+            depTitles << v.toString();
+        if (!depTitles.isEmpty())
+            pendingDeps.insert(node->id, depTitles);
+    }
 
     // Kinder rekursiv
     QJsonArray children = obj.value("children").toArray();
-    int count = 1;  // dieser Knoten
+    int count = 1;
     for (int i = 0; i < children.size(); ++i)
-        count += parsePlanNode(children[i].toObject(), node, depth + 1);
-
+        count += parsePlanNode(children[i].toObject(), node, depth + 1,
+                               titleToId, pendingDeps);
     return count;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PRIVATE METHODEN (unverändert aus vorheriger Version)
+// PRIVATE METHODEN (unverändert)
 // ═════════════════════════════════════════════════════════════════════════════
 
 void Agent::startGeneration(LlamaWorker::SamplerProfile profile)

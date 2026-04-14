@@ -2,10 +2,9 @@
 // ─── TaskTree ─────────────────────────────────────────────────────────────────
 // Container für den hierarchischen Aufgabenbaum. RAM-first.
 //
-// Neu in v2:
-//   buildContext() — aggregiert vertikalen + horizontalen Kontext für das Modell
-//   dependsOn wird über den QHash aufgelöst (O(1) pro Abhängigkeit)
-//   SQLite-Schema um scope + depends_on erweitert
+// Neu in v3:
+//   removeNode() — löscht Knoten + alle Kinder, bereinigt m_index
+//   clear()      — löscht kompletten RAM-Tree (DB bleibt erhalten)
 
 #include "TaskNode.h"
 
@@ -45,6 +44,7 @@ public:
         node->level       = level;
         node->scope       = scope;
         node->order       = order;
+        node->dirty       = true;   // neu erstellte Knoten müssen gespeichert werden
 
         if (parent) {
             parent->addChild(node);
@@ -53,23 +53,19 @@ public:
             m_roots.push_back(node);
         }
 
-
         m_index[node->id] = node;
-        node->dirty = true;
         m_dirty = true;
         return node;
     }
 
     // ── Abhängigkeit hinzufügen ───────────────────────────────────────────────
-    // Trägt eine horizontale Abhängigkeit ein.
-    // Offen — keine Einschränkung auf H2 oder bestimmte Scopes.
     void addDependency(TaskNode *from, TaskNode *to)
     {
         if (!from || !to) return;
-        if (from->dependsOn.contains(to->id)) return;  // kein Duplikat
+        if (from->dependsOn.contains(to->id)) return;
         from->dependsOn.append(to->id);
-        from->dirty  = true;
-        m_dirty      = true;
+        from->dirty = true;
+        m_dirty     = true;
     }
 
     void removeDependency(TaskNode *from, qint64 toId)
@@ -80,22 +76,62 @@ public:
         m_dirty     = true;
     }
 
-    // ── Kontext für das Modell bauen ──────────────────────────────────────────
-    // Liefert den vollständigen Kontext für einen Knoten:
-    //   [Vertikal]   Pfad von H0 bis zu diesem Knoten
-    //   [Horizontal] Titel + Description aller dependsOn-Knoten
+    // ── Knoten löschen ───────────────────────────────────────────────────────
+    // Löscht einen Knoten + alle Kinder rekursiv aus dem Tree.
+    // Bereinigt m_index für alle gelöschten Knoten.
     //
-    // Das ist was das Modell als Prompt bekommt — kompakt, kein Overflow.
-    // Analogie: Montageband-Arbeiter bekommt seinen Schritt + die Schnittstellen
-    // zu den Nachbar-Stationen, nicht die komplette Bauanleitung.
+    // Analogie AVR: wie das Freigeben einer verketteten Liste — erst alle
+    // Folgeelemente (Kinder) aus dem Index entfernen, dann delete.
+    void removeNode(TaskNode *node)
+    {
+        if (!node) return;
+
+        // Schritt 1: alle Knoten aus m_index entfernen
+        std::function<void(TaskNode*)> removeFromIndex = [&](TaskNode *n) {
+            m_index.remove(n->id);
+            for (TaskNode *child : n->children)
+                removeFromIndex(child);
+        };
+        removeFromIndex(node);
+
+        // Schritt 2: aus Elter oder m_roots aushängen
+        if (node->parent) {
+            node->parent->removeChild(node);
+        } else {
+            auto it = std::find(m_roots.begin(), m_roots.end(), node);
+            if (it != m_roots.end())
+                m_roots.erase(it);
+        }
+
+        // Schritt 3: löschen (Destruktor löscht Kinder rekursiv)
+        delete node;
+        m_dirty = true;
+    }
+
+    // ── Kompletten RAM-Tree löschen ───────────────────────────────────────────
+    // DB bleibt unberührt — nur RAM-Zustand wird zurückgesetzt.
+    // Wird in Agent::startPlan() aufgerufen wenn /plan ein zweites Mal
+    // ausgeführt wird — frischer Start ohne alten Plan-Ballast.
+    //
+    // Analogie AVR: wie ein Buffer-Reset vor neuem DMA-Transfer.
+    void clear()
+    {
+        for (TaskNode *root : m_roots)
+            delete root;   // Destruktor löscht Kinder rekursiv
+        m_roots.clear();
+        m_index.clear();
+        m_nextId = 1;
+        m_dirty  = false;
+        // m_dbPath und m_db bleiben erhalten — kein erneutes setDbPath() nötig
+    }
+
+    // ── Kontext für das Modell bauen ──────────────────────────────────────────
     QString buildContext(const TaskNode *node) const
     {
         if (!node) return {};
 
-        // Vertikaler Teil
         QString ctx = node->verticalContext();
 
-        // Horizontaler Teil — dependsOn auflösen
         if (!node->dependsOn.isEmpty()) {
             ctx += "\n--- Abhängigkeiten ---\n";
             for (qint64 depId : node->dependsOn) {
@@ -105,7 +141,6 @@ public:
                        .arg(TaskNode::levelName(dep->level))
                        .arg(TaskNode::scopeName(dep->scope))
                        .arg(dep->title);
-                // Nur description — nicht result (kein Code-Overflow)
                 if (!dep->description.isEmpty())
                     ctx += dep->description + "\n";
                 ctx += "\n";
@@ -139,7 +174,6 @@ public:
         return m_index.value(id, nullptr);
     }
 
-    // Nächste ausstehende Aufgabe (Tiefensuche, Pending-Blatt)
     TaskNode *nextPending() const {
         for (TaskNode *root : m_roots) {
             TaskNode *found = findNextPending(root);
@@ -159,7 +193,6 @@ public:
     }
 
     // ── Persistenz ────────────────────────────────────────────────────────────
-
     bool save()
     {
         if (!openDb()) return false;
@@ -207,7 +240,6 @@ public:
             node->updatedAt   = QDateTime::fromString(q.value(12).toString(), Qt::ISODate);
             node->dirty       = false;
 
-            // dependsOn aus komma-separiertem String
             const QString depsStr = q.value(9).toString();
             if (!depsStr.isEmpty()) {
                 for (const QString &s : depsStr.split(',', Qt::SkipEmptyParts))
@@ -233,7 +265,6 @@ public:
             }
         }
 
-        // Kinder sortieren
         traverse([](TaskNode *node) {
             std::stable_sort(node->children.begin(), node->children.end(),
                 [](const TaskNode *a, const TaskNode *b) {
@@ -250,58 +281,7 @@ public:
     bool isEmpty()   const { return m_roots.empty(); }
     int  nodeCount() const { return static_cast<int>(m_index.size()); }
     const std::vector<TaskNode*> &roots() const { return m_roots; }
-// ─── removeNode ──────────────────────────────────────────────────────────────
-// Löscht einen Knoten + alle seine Kinder rekursiv aus dem Tree.
-// Bereinigt m_index für alle gelöschten Knoten.
-// Hängt den Knoten aus dem Elternknoten (oder m_roots) aus.
-//
-// Warum rekursive Index-Bereinigung?
-//   m_index ist ein QHash<qint64, TaskNode*>. Wenn wir nur den obersten Knoten
-//   löschen aber seine Kinder im Index lassen, entstehen dangling pointers.
-//   Die rekursive Bereinigung stellt sicher dass m_index konsistent bleibt.
-//
-// Analogie AVR: wie das Freigeben einer verketteten Liste — erst alle
-//   Folgeelemente (Kinder) freigeben, dann das Element selbst.
-//   Ohne das würden wir "memory leaks" im Index hinterlassen.
-//
-// Einzufügen in TaskTree.h nach:
-//   const std::vector<TaskNode*> &roots() const { return m_roots; }
-//
-void removeNode(TaskNode *node)
-{
-    if (!node) return;
 
-    // Schritt 1: alle Knoten (dieser + alle Kinder) aus m_index entfernen.
-    // Wir traversieren den Teilbaum vor dem Löschen — danach sind die
-    // Pointer ungültig.
-    // traverse() auf dem Teilbaum: wir rufen traverseNode() direkt.
-    std::function<void(TaskNode*)> removeFromIndex = [&](TaskNode *n) {
-        m_index.remove(n->id);
-        for (TaskNode *child : n->children)
-            removeFromIndex(child);
-    };
-    removeFromIndex(node);
-
-    // Schritt 2: Knoten aus Eltern oder m_roots aushängen.
-    if (node->parent) {
-        // Aus Eltern-children-Vector entfernen (nicht löschen — delete folgt)
-        node->parent->removeChild(node);
-    } else {
-        // Wurzelknoten → aus m_roots entfernen
-        auto it = std::find(m_roots.begin(), m_roots.end(), node);
-        if (it != m_roots.end())
-            m_roots.erase(it);
-    }
-
-    // Schritt 3: Knoten + Kinder rekursiv löschen.
-    // TaskNode-Destruktor löscht children rekursiv — ein delete reicht.
-    delete node;
-
-    m_dirty = true;
-}
-
-
-    // DB-Pfad nachtraglich setzen (fuer Dialoge: Speichern unter / Laden)
     void setDbPath(const QString &path) {
         if (m_db.isOpen()) m_db.close();
         m_dbPath = path;
@@ -365,11 +345,13 @@ private:
     {
         if (m_db.isOpen()) return true;
         if (m_dbPath.isEmpty()) { qWarning() << "TaskTree: no db path"; return false; }
-        // Connection-Name eindeutig per DB-Pfad — verhindert "duplicate connection"
-        // wenn mehrere TaskTree-Instanzen gleichzeitig existieren (z.B. im Test).
         const QString connName = "taskdb_" + m_dbPath;
-        m_db = QSqlDatabase::addDatabase("QSQLITE", connName);
-        m_db.setDatabaseName(m_dbPath);
+        if (QSqlDatabase::contains(connName)) {
+            m_db = QSqlDatabase::database(connName);
+        } else {
+            m_db = QSqlDatabase::addDatabase("QSQLITE", connName);
+            m_db.setDatabaseName(m_dbPath);
+        }
         if (!m_db.open()) {
             qWarning() << "TaskTree:" << m_db.lastError().text();
             return false;
@@ -386,7 +368,7 @@ private:
             "  title         TEXT    NOT NULL,"
             "  description   TEXT,"
             "  result        TEXT,"
-            "  depends_on    TEXT,"   // komma-separierte IDs: "3,7,12"
+            "  depends_on    TEXT,"
             "  status        TEXT    DEFAULT 'pending',"
             "  created_at    TEXT,"
             "  updated_at    TEXT"
@@ -397,7 +379,6 @@ private:
 
     void upsertNode(QSqlQuery &q, const TaskNode *node)
     {
-        // dependsOn als komma-separierter String
         QStringList depStrs;
         for (qint64 d : node->dependsOn) depStrs << QString::number(d);
 

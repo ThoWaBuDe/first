@@ -1,5 +1,6 @@
 #include "PlannerDock.h"
 #include "TaskNodeDialog.h"
+#include "AppConfig.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -20,9 +21,9 @@ PlannerDock::PlannerDock(Agent *agent, QWidget *parent)
 
     setupUi();
 
-    connect(m_agent, &Agent::planReady,        this, &PlannerDock::onPlanReady);
-    connect(m_agent, &Agent::taskTreeUpdated,  this, &PlannerDock::onTreeUpdated);
-    connect(m_agent, &Agent::modeChanged,      this, &PlannerDock::onModeChanged);
+    connect(m_agent, &Agent::planReady,       this, &PlannerDock::onPlanReady);
+    connect(m_agent, &Agent::taskTreeUpdated, this, &PlannerDock::onTreeUpdated);
+    connect(m_agent, &Agent::modeChanged,     this, &PlannerDock::onModeChanged);
     connect(m_confirmButton, &QPushButton::clicked, m_agent, &Agent::onPlanApproved);
     connect(m_rejectButton,  &QPushButton::clicked, m_agent, &Agent::onPlanRejected);
 }
@@ -52,14 +53,9 @@ void PlannerDock::setupUi()
     m_treeView->header()->setSectionResizeMode(QHeaderView::ResizeToContents);
     m_treeView->setMinimumHeight(120);
 
-    // Kontextmenü: Qt::CustomContextMenu aktivieren damit wir das Menü
-    // selbst bauen können. Ohne dieses Flag liefert Qt kein contextMenuRequested.
     m_treeView->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_treeView, &QTreeView::customContextMenuRequested,
             this,       &PlannerDock::onContextMenu);
-
-    // Doppelklick / Enter → Bearbeiten
-    // activated() statt doubleClicked() — reagiert auch auf Enter-Taste.
     connect(m_treeView, &QTreeView::activated,
             this,       &PlannerDock::onNodeActivated);
 
@@ -94,7 +90,7 @@ void PlannerDock::setupUi()
     m_nodeCountLabel->setStyleSheet("color: #888; font-size: 10px;");
     mainLayout->addWidget(m_nodeCountLabel);
 
-    // ── Approval-Buttons ──────────────────────────────────────────────────
+    // ── Buttons ───────────────────────────────────────────────────────────
     auto *btnLayout = new QHBoxLayout;
     btnLayout->setSpacing(6);
 
@@ -114,34 +110,38 @@ void PlannerDock::setupUi()
         "QPushButton:disabled { background: #ccc; color: #888; }");
     m_rejectButton->hide();
 
+    // "Plan laden" — lädt gespeicherten Plan aus SQLite nach App-Neustart
+    m_loadButton = new QPushButton("📂 Plan laden");
+    m_loadButton->setToolTip(
+        QString("Gespeicherten Plan laden aus:\n%1")
+        .arg(AppConfig::instance().taskDbPath()));
+    m_loadButton->setStyleSheet(
+        "QPushButton { border-radius: 4px; padding: 4px 8px; }"
+        "QPushButton:hover { background: #e8f0fe; }");
+
+    connect(m_loadButton, &QPushButton::clicked, this, &PlannerDock::onLoadPlan);
+
     btnLayout->addWidget(m_confirmButton);
     btnLayout->addWidget(m_rejectButton);
     btnLayout->addStretch();
+    btnLayout->addWidget(m_loadButton);
     mainLayout->addLayout(btnLayout);
 
     setWidget(container);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// EXPAND-ZUSTAND: SICHERN + WIEDERHERSTELLEN
+// EXPAND-ZUSTAND
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ─── saveExpandState ─────────────────────────────────────────────────────────
-// Traversiert alle Indizes im Model und sammelt die IDs der aufgeklappten Knoten.
-//
+// Sammelt IDs aller aufgeklappten Knoten.
 // Warum IDs statt QModelIndex?
-//   QModelIndex enthält internalPointer() auf TaskNode* — nach beginResetModel()
-//   sind alle alten Indizes ungültig. IDs (qint64) bleiben stabil weil sie im
-//   TaskNode selbst stecken, nicht im Model.
-//
-// Analogie AVR: wie das Sichern des SREG-Registers in eine lokale Variable
-// bevor cli() aufgerufen wird — der Zustand überlebt den Reset.
+//   QModelIndex ist nach beginResetModel() ungültig — IDs im TaskNode bleiben stabil.
+// Analogie AVR: SREG in lokale Variable sichern bevor cli().
 QSet<qint64> PlannerDock::saveExpandState() const
 {
     QSet<qint64> expanded;
-
-    // Rekursive Hilfsfunktion als Lambda — durchsucht alle Indizes
-    // Eine std::function ist nötig weil das Lambda sich selbst aufruft.
     std::function<void(const QModelIndex&)> collect =
         [&](const QModelIndex &parent) {
             for (int row = 0; row < m_model->rowCount(parent); ++row) {
@@ -150,43 +150,33 @@ QSet<qint64> PlannerDock::saveExpandState() const
                     TaskNode *n = m_model->node(idx);
                     if (n) expanded.insert(n->id);
                 }
-                // Auch nicht-aufgeklappte Knoten durchsuchen —
-                // ihre Kinder könnten aufgeklappt sein.
                 collect(idx);
             }
         };
-
     collect(QModelIndex{});
     return expanded;
 }
 
 // ─── restoreExpandState ──────────────────────────────────────────────────────
-// Stellt den Expand-Zustand nach einem Model-Reset wieder her.
-// Traversiert alle neuen Indizes und klappt die auf deren ID in `expanded` ist.
-//
-// Analogie AVR: wie das Wiederherstellen des SREG nach sei() —
-// der Zustand wird aus der gesicherten Variable geladen.
+// Stellt Expand-Zustand nach Model-Reset wieder her.
+// Analogie AVR: SREG aus lokaler Variable wiederherstellen nach sei().
 void PlannerDock::restoreExpandState(const QSet<qint64> &expanded)
 {
     if (expanded.isEmpty()) return;
-
     std::function<void(const QModelIndex&)> restore =
         [&](const QModelIndex &parent) {
             for (int row = 0; row < m_model->rowCount(parent); ++row) {
                 QModelIndex idx = m_model->index(row, 0, parent);
                 TaskNode *n = m_model->node(idx);
-                if (n && expanded.contains(n->id)) {
+                if (n && expanded.contains(n->id))
                     m_treeView->expand(idx);
-                }
                 restore(idx);
             }
         };
-
     restore(QModelIndex{});
 }
 
 // ─── selectedNode ─────────────────────────────────────────────────────────────
-// Gibt den aktuell selektierten Knoten zurück, oder nullptr.
 TaskNode *PlannerDock::selectedNode() const
 {
     QModelIndex idx = m_treeView->currentIndex();
@@ -199,8 +189,6 @@ TaskNode *PlannerDock::selectedNode() const
 // ═════════════════════════════════════════════════════════════════════════════
 
 // ─── openEditDialog ──────────────────────────────────────────────────────────
-// Öffnet TaskNodeDialog für den übergebenen Knoten.
-// Bei OK: applyToNode() + Tree refresh mit Expand-Erhalt.
 void PlannerDock::openEditDialog(TaskNode *node)
 {
     if (!node) return;
@@ -211,24 +199,18 @@ void PlannerDock::openEditDialog(TaskNode *node)
     if (dlg.exec() == QDialog::Accepted) {
         dlg.applyToNode();
 
-        // Expand-Zustand sichern → refresh → wiederherstellen
-        // Das ist der Fix für das "Tree klappt ein"-Problem.
         auto expanded = saveExpandState();
         m_model->refresh();
         restoreExpandState(expanded);
 
-        // Knoten-Zähler + Spaltenbreite
-        int count = m_agent->taskTree().nodeCount();
-        m_nodeCountLabel->setText(QString("%1 Knoten").arg(count));
+        m_nodeCountLabel->setText(
+            QString("%1 Knoten").arg(m_agent->taskTree().nodeCount()));
         m_treeView->resizeColumnToContents(0);
-
-        // Kontext-Anzeige aktualisieren
         m_contextView->setPlainText(m_agent->taskTree().buildContext(node));
     }
 }
 
 // ─── onNodeActivated ─────────────────────────────────────────────────────────
-// Doppelklick oder Enter → Edit-Dialog öffnen.
 void PlannerDock::onNodeActivated(const QModelIndex &index)
 {
     if (!index.isValid() || !m_model) return;
@@ -239,16 +221,6 @@ void PlannerDock::onNodeActivated(const QModelIndex &index)
 // KONTEXTMENÜ
 // ═════════════════════════════════════════════════════════════════════════════
 
-// ─── onContextMenu ────────────────────────────────────────────────────────────
-// Baut das Kontextmenü dynamisch auf.
-//
-// "Geschwister hinzufügen" ist nur aktiv wenn der Knoten einen Elternknoten hat
-// (H0-Wurzelknoten hat keinen Elter → kein Geschwister möglich).
-// "Löschen" ist immer verfügbar wenn ein Knoten selektiert ist.
-//
-// QMenu::exec(globalPos) öffnet das Menü modal an der Mausposition.
-// Analogie AVR: wie ein Interrupt-Handler der kontextabhängig verschiedene
-// Aktionen auslöst — welche Aktion, entscheidet der Zustand (selektierter Knoten).
 void PlannerDock::onContextMenu(const QPoint &pos)
 {
     QModelIndex idx = m_treeView->indexAt(pos);
@@ -272,11 +244,9 @@ void PlannerDock::onContextMenu(const QPoint &pos)
         menu.addSeparator();
 
         QAction *deleteAct = menu.addAction("🗑 Löschen");
-        // Styling: rote Farbe für destruktive Aktion
-        deleteAct->setIcon(QIcon::fromTheme("edit-delete"));
         connect(deleteAct, &QAction::triggered, this, &PlannerDock::onDeleteNode);
     } else {
-        // Kein Knoten unter der Maus — nur "Neu" anbieten wenn Tree leer
+        // Kein Knoten → Wurzel anbieten wenn Tree leer
         if (m_agent->taskTree().isEmpty()) {
             QAction *newRootAct = menu.addAction("➕ Wurzelknoten hinzufügen");
             connect(newRootAct, &QAction::triggered, this, [this]() {
@@ -294,44 +264,25 @@ void PlannerDock::onContextMenu(const QPoint &pos)
         menu.exec(m_treeView->viewport()->mapToGlobal(pos));
 }
 
-// ─── onEditNode ──────────────────────────────────────────────────────────────
 void PlannerDock::onEditNode()
 {
     openEditDialog(selectedNode());
 }
 
 // ─── onAddChild ──────────────────────────────────────────────────────────────
-// Fügt einen leeren Kindknoten ein und öffnet sofort den Edit-Dialog.
-//
-// level = parent->level + 1  — Kind ist eine Ebene tiefer.
-// scope = Internal           — Implementierungsdetail als sicherer Default.
-// order = 0                  — wird in addChild() via insertionIdx sortiert.
-//
-// Ablauf:
-//   1. Leerer Knoten erstellen + in Tree einhängen
-//   2. Tree-View aktualisieren (refresh mit Expand-Erhalt)
-//   3. Neuen Knoten selektieren + aufklappen
-//   4. Edit-Dialog öffnen
-//   Bei Abbrechen: Knoten bleibt leer im Tree (User kann ihn per Löschen entfernen).
+// Fügt leeren Kindknoten ein + öffnet sofort Dialog.
+// level = parent->level + 1, scope = Internal als sicherer Default.
 void PlannerDock::onAddChild()
 {
     TaskNode *parent = selectedNode();
     if (!parent) return;
 
     TaskTree *tree = const_cast<TaskTree*>(&m_agent->taskTree());
-
-    // Leerer Knoten — Titel "Neue Aufgabe" als Platzhalter
     TaskNode *child = tree->createNode(
-        "Neue Aufgabe",
-        "",
-        parent->level + 1,
-        TaskScope::Internal,
-        0,
-        parent);
+        "Neue Aufgabe", "", parent->level + 1,
+        TaskScope::Internal, 0, parent);
 
-    // Expand-Zustand sichern + refresh
     auto expanded = saveExpandState();
-    // Elternknoten soll aufgeklappt bleiben
     expanded.insert(parent->id);
     m_model->refresh();
     restoreExpandState(expanded);
@@ -341,21 +292,18 @@ void PlannerDock::onAddChild()
     m_treeView->resizeColumnToContents(0);
 
     // Neuen Knoten im View selektieren
-    // Wir suchen seinen Index über das Model.
-    // QAbstractItemModel::match() wäre möglich aber aufwändig.
-    // Einfacher: traverse und Index über internalPointer vergleichen.
-    std::function<QModelIndex(const QModelIndex&)> findIndex =
-        [&](const QModelIndex &parent) -> QModelIndex {
-            for (int row = 0; row < m_model->rowCount(parent); ++row) {
-                QModelIndex idx = m_model->index(row, 0, parent);
-                if (m_model->node(idx) == child) return idx;
-                QModelIndex found = findIndex(idx);
-                if (found.isValid()) return found;
+    std::function<QModelIndex(const QModelIndex&)> findIdx =
+        [&](const QModelIndex &p) -> QModelIndex {
+            for (int row = 0; row < m_model->rowCount(p); ++row) {
+                QModelIndex i = m_model->index(row, 0, p);
+                if (m_model->node(i) == child) return i;
+                QModelIndex f = findIdx(i);
+                if (f.isValid()) return f;
             }
             return {};
         };
 
-    QModelIndex childIdx = findIndex(QModelIndex{});
+    QModelIndex childIdx = findIdx(QModelIndex{});
     if (childIdx.isValid()) {
         m_treeView->setCurrentIndex(childIdx);
         m_treeView->scrollTo(childIdx);
@@ -365,22 +313,16 @@ void PlannerDock::onAddChild()
 }
 
 // ─── onAddSibling ────────────────────────────────────────────────────────────
-// Fügt einen Geschwisterknoten ein — gleicher level, gleicher Elter.
-// Nur verfügbar wenn der selektierte Knoten einen Elternknoten hat.
+// Fügt Geschwisterknoten ein — gleicher level, gleicher Elter.
 void PlannerDock::onAddSibling()
 {
     TaskNode *sibling = selectedNode();
     if (!sibling || !sibling->parent) return;
 
     TaskTree *tree = const_cast<TaskTree*>(&m_agent->taskTree());
-
     TaskNode *newNode = tree->createNode(
-        "Neue Aufgabe",
-        "",
-        sibling->level,         // gleiche Ebene wie Geschwister
-        sibling->scope,         // gleicher Scope als sinnvoller Default
-        sibling->order + 1,     // nach dem aktuellen Geschwister einsortieren
-        sibling->parent);       // gleicher Elter
+        "Neue Aufgabe", "", sibling->level,
+        sibling->scope, sibling->order + 1, sibling->parent);
 
     auto expanded = saveExpandState();
     expanded.insert(sibling->parent->id);
@@ -391,19 +333,18 @@ void PlannerDock::onAddSibling()
         QString("%1 Knoten").arg(m_agent->taskTree().nodeCount()));
     m_treeView->resizeColumnToContents(0);
 
-    // Neuen Knoten selektieren
-    std::function<QModelIndex(const QModelIndex&)> findIndex =
-        [&](const QModelIndex &parent) -> QModelIndex {
-            for (int row = 0; row < m_model->rowCount(parent); ++row) {
-                QModelIndex idx = m_model->index(row, 0, parent);
-                if (m_model->node(idx) == newNode) return idx;
-                QModelIndex found = findIndex(idx);
-                if (found.isValid()) return found;
+    std::function<QModelIndex(const QModelIndex&)> findIdx =
+        [&](const QModelIndex &p) -> QModelIndex {
+            for (int row = 0; row < m_model->rowCount(p); ++row) {
+                QModelIndex i = m_model->index(row, 0, p);
+                if (m_model->node(i) == newNode) return i;
+                QModelIndex f = findIdx(i);
+                if (f.isValid()) return f;
             }
             return {};
         };
 
-    QModelIndex newIdx = findIndex(QModelIndex{});
+    QModelIndex newIdx = findIdx(QModelIndex{});
     if (newIdx.isValid()) {
         m_treeView->setCurrentIndex(newIdx);
         m_treeView->scrollTo(newIdx);
@@ -413,19 +354,12 @@ void PlannerDock::onAddSibling()
 }
 
 // ─── onDeleteNode ────────────────────────────────────────────────────────────
-// Löscht den selektierten Knoten + alle Kinder nach Sicherheitsabfrage.
-//
-// Sicherheitsabfrage zeigt:
-//   - Titel des Knotens
-//   - Anzahl der Kinder (damit User weiß was gelöscht wird)
-//
-// removeNode() ist in TaskTree implementiert — löscht rekursiv + bereinigt m_index.
+// Löscht Knoten + alle Kinder nach Sicherheitsabfrage.
 void PlannerDock::onDeleteNode()
 {
     TaskNode *node = selectedNode();
     if (!node) return;
 
-    // Sicherheitsabfrage aufbauen
     int childCount = static_cast<int>(node->children.size());
     QString msg = QString("Knoten <b>%1</b> löschen?")
                   .arg(node->title.toHtmlEscaped());
@@ -435,22 +369,16 @@ void PlannerDock::onDeleteNode()
                .arg(childCount);
     }
 
-    QMessageBox::StandardButton answer = QMessageBox::question(
-        this,
-        "Knoten löschen",
-        msg,
-        QMessageBox::Yes | QMessageBox::Cancel,
-        QMessageBox::Cancel);
-
-    if (answer != QMessageBox::Yes) return;
+    if (QMessageBox::question(this, "Knoten löschen", msg,
+            QMessageBox::Yes | QMessageBox::Cancel,
+            QMessageBox::Cancel) != QMessageBox::Yes)
+        return;
 
     TaskTree *tree = const_cast<TaskTree*>(&m_agent->taskTree());
-
-    // Expand-Zustand sichern bevor wir löschen
     auto expanded = saveExpandState();
-    expanded.remove(node->id);  // gelöschten Knoten aus expanded entfernen
+    expanded.remove(node->id);
 
-    tree->removeNode(node);  // löscht Knoten + Kinder + bereinigt m_index
+    tree->removeNode(node);
 
     m_model->refresh();
     restoreExpandState(expanded);
@@ -461,17 +389,48 @@ void PlannerDock::onDeleteNode()
     m_treeView->resizeColumnToContents(0);
 }
 
+// ─── onLoadPlan ──────────────────────────────────────────────────────────────
+// Lädt gespeicherten Plan aus SQLite — nützlich nach App-Neustart.
+// TaskTree::load() liest alle Knoten + dependsOn-IDs aus der DB.
+void PlannerDock::onLoadPlan()
+{
+    TaskTree *tree = const_cast<TaskTree*>(&m_agent->taskTree());
+    bool ok = tree->load();
+
+    if (!ok) {
+        m_statusLabel->setText("Fehler: Plan konnte nicht geladen werden.");
+        m_statusLabel->setStyleSheet(
+            "color: #c5221f; font-size: 11px; font-weight: bold; padding: 2px;");
+        return;
+    }
+
+    int count = tree->nodeCount();
+    if (count == 0) {
+        m_statusLabel->setText("Keine gespeicherten Pläne in der DB gefunden.");
+        return;
+    }
+
+    m_model->refresh();
+    m_treeView->expandAll();
+
+    m_nodeCountLabel->setText(QString("%1 Knoten geladen").arg(count));
+    m_statusLabel->setText(
+        QString("Plan geladen: %1 Knoten — Doppelklick zum Bearbeiten.").arg(count));
+    m_statusLabel->setStyleSheet(
+        "color: #188038; font-size: 11px; font-weight: bold; padding: 2px;");
+
+    show();
+    raise();
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // AGENT-SIGNALE
 // ═════════════════════════════════════════════════════════════════════════════
 
 void PlannerDock::onPlanReady()
 {
-    auto expanded = saveExpandState();
     m_model->refresh();
-    // Bei planReady: alles aufklappen damit User den vollen Plan sieht
     m_treeView->expandAll();
-    // expandAll() überschreibt restoreExpandState — hier bewusst nicht aufrufen
 
     m_statusLabel->setText(
         "Plan bereit — prüfen, ggf. Bearbeiten (Doppelklick/Rechtsklick), dann bestätigen.");
@@ -481,8 +440,8 @@ void PlannerDock::onPlanReady()
     m_confirmButton->show();
     m_rejectButton->show();
 
-    int count = m_agent->taskTree().nodeCount();
-    m_nodeCountLabel->setText(QString("%1 Knoten").arg(count));
+    m_nodeCountLabel->setText(
+        QString("%1 Knoten").arg(m_agent->taskTree().nodeCount()));
     m_treeView->resizeColumnToContents(0);
 
     show();
@@ -492,13 +451,12 @@ void PlannerDock::onPlanReady()
 void PlannerDock::onTreeUpdated()
 {
     if (!m_model) return;
-
     auto expanded = saveExpandState();
     m_model->refresh();
     restoreExpandState(expanded);
 
-    int count = m_agent->taskTree().nodeCount();
-    m_nodeCountLabel->setText(QString("%1 Knoten").arg(count));
+    m_nodeCountLabel->setText(
+        QString("%1 Knoten").arg(m_agent->taskTree().nodeCount()));
     m_treeView->resizeColumnToContents(0);
 }
 
