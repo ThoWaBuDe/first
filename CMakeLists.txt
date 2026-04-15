@@ -50,6 +50,7 @@ set(HEADERS
     src/TaskTree.h
     src/TaskTreeModel.h
     src/TaskNodeDialog.h
+    src/ExecuteMemory.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}

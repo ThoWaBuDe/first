@@ -13,14 +13,14 @@
 #include "ChatTemplate.h"
 
 // ─── ConfigDialog ─────────────────────────────────────────────────────────────
-// Modaler QDialog mit Tabs für alle AppConfig-Parameter.
-//
 // Tabs:
 //   Modell           — Pfad, n_ctx, Batch-Size
 //   Sampler          — Chat und Tool Profile
 //   Agent            — Schwellen, Continuations, Token-Budget
 //   Logging          — Chat-Log, Tavily API Key
-//   Template & Prompt — Chat-Template ComboBox + User System-Prompt  ← NEU
+//   Template & Prompt — Chat-Template + User System-Prompt
+//   Execute          — Thoughts-Obergrenze, Auto-Mode, Sandbox-Projekt  ← NEU
+
 class ConfigDialog : public QDialog {
     Q_OBJECT
 
@@ -44,7 +44,8 @@ private:
     QWidget *createSamplerTab();
     QWidget *createAgentTab();
     QWidget *createLoggingTab();
-    QWidget *createTemplateTab();   // ← NEU
+    QWidget *createTemplateTab();
+    QWidget *createExecuteTab();    // NEU
 
     void loadFromConfig();
     void saveToConfig();
@@ -83,13 +84,17 @@ private:
     QLineEdit *m_tavilyApiKey;
 
     // ─── Template & Prompt Tab ────────────────────────────────────────────
-    QComboBox *m_chatTemplateCombo;     // Preset-Auswahl (Auto/ChatML/Llama3/...)
-    QLabel    *m_detectedTemplateLabel; // zeigt was aus GGUF erkannt wurde
-    QTextEdit *m_customTemplateEdit;    // nur aktiv bei "Custom"
-    QLabel    *m_customTemplateLabel;   // Label dazu (zusammen ein/ausblenden)
-    QTextEdit *m_userSystemPrompt;      // freier User-Text vor MCP-Prompts
+    QComboBox *m_chatTemplateCombo;
+    QLabel    *m_detectedTemplateLabel;
+    QTextEdit *m_customTemplateEdit;
+    QLabel    *m_customTemplateLabel;
+    QTextEdit *m_userSystemPrompt;
 
-    // Welche Gruppen wurden verändert
+    // ─── Execute Tab ──────────────────────────────────────────────────────
+    QSpinBox  *m_executeMemoryMaxEntries;  // Thoughts-Obergrenze
+    QCheckBox *m_executeAutoMode;          // Modell entscheidet Granularität
+    QLineEdit *m_executeSandboxProject;    // Unterverzeichnis in ~/llamatools/
+
     bool m_samplersChanged  = false;
     bool m_restartNeeded    = false;
     bool m_loggingChanged   = false;

@@ -19,6 +19,28 @@ const QStringList Agent::PLAN_ALLOWED_TOOLS = {
     "get_pwd",
 };
 
+const QStringList Agent::EXECUTE_ALLOWED_TOOLS = {
+    // Lese-Tools
+    "read_file",
+    "list_dir",
+    "get_symbol",
+    "get_project_index",
+    "get_function_body",
+    "get_class_members",
+    "get_includes",
+    "check_syntax",
+    "read_multiple_files",
+    "grep_code",
+    "search_code",
+    // Web
+    "web_search",
+    // System (read-only)
+    "get_time",
+    "sys_info",
+    "get_pwd",
+    "disk_free",
+};
+
 // ─── Konstruktor ──────────────────────────────────────────────────────────────
 Agent::Agent(const QString &modelPath, QObject *parent)
     : QObject(parent)
@@ -177,7 +199,67 @@ void Agent::onUserMessage(const QString &text)
                 startPlan(auftrag);
                 return;
             }
+            // ─── Execute-Modus ────────────────────────────────────────────────────
+            // /execute → Agent::startExecute()
+            if (result.prompt == "__EXECUTE__") {
+                if (m_taskTree.isEmpty()) {
+                    emit appendTools(
+                        "Kein Plan geladen. Bitte zuerst /plan oder /loadDB ausführen.",
+                        "error");
+                    emit inputEnabled(true);
+                    return;
+                }
+                if (m_taskTree.nextPending() == nullptr) {
+                    emit appendTools(
+                        "Alle Nodes bereits erledigt. "
+                        "Neuen Plan erstellen mit /plan oder /loadDB.",
+                        "system");
+                    emit inputEnabled(true);
+                    return;
+                }
+                emit appendChat("<b>[System]</b> Execute-Modus gestartet.", "system");
+                startExecute();
+                return;
+            }
 
+            // ─── SaveDB ───────────────────────────────────────────────────────────
+            // /saveDB → TaskTree + ExecuteMemory speichern
+            if (result.prompt == "__SAVEDB__") {
+                bool ok1 = m_taskTree.save();
+                bool ok2 = m_executeMemory.save();
+                if (ok1 && ok2) {
+                    emit appendTools(
+                        QString("<b>DB gespeichert:</b> %1 Nodes, %2 Thoughts in <code>%3</code>")
+                            .arg(m_taskTree.nodeCount())
+                            .arg(m_executeMemory.count())
+                            .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
+                        "system");
+                } else {
+                    emit appendTools("<b>Fehler beim Speichern der DB.</b>", "error");
+                }
+                emit inputEnabled(true);
+                return;
+            }
+
+            // ─── LoadDB ───────────────────────────────────────────────────────────
+            // /loadDB → TaskTree + ExecuteMemory laden, PlannerDock aktualisieren
+            if (result.prompt == "__LOADDB__") {
+                bool ok1 = m_taskTree.load();
+                bool ok2 = m_executeMemory.load();
+                if (ok1) {
+                    emit taskTreeUpdated();
+                    emit appendTools(
+                        QString("<b>DB geladen:</b> %1 Nodes, %2 Thoughts aus <code>%3</code>")
+                            .arg(m_taskTree.nodeCount())
+                            .arg(m_executeMemory.count())
+                            .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
+                        "system");
+                } else {
+                    emit appendTools("<b>Fehler beim Laden der DB.</b>", "error");
+                }
+                emit inputEnabled(true);
+                return;
+            }
             if (result.prompt.isEmpty()) return;
 
             emit appendChat(QString("<b>Du:</b> %1").arg(text.toHtmlEscaped()), "user");
@@ -276,6 +358,11 @@ void Agent::onFileSavedByUser(const QString &filePath)
     m_logger.logSystem(QString("User hat %1 manuell gespeichert.").arg(filePath));
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// onPlanApproved() — GEÄNDERT: wechselt jetzt zu Execute statt Chat
+// Ersetzt die bisherige Implementierung komplett.
+// ═════════════════════════════════════════════════════════════════════════════
+
 void Agent::onPlanApproved()
 {
     if (m_mode != AgentMode::Plan) return;
@@ -283,20 +370,12 @@ void Agent::onPlanApproved()
     m_taskTree.save();
     emit appendTools(
         QString("<b>Plan gespeichert:</b> %1 Knoten in <code>%2</code>")
-        .arg(m_taskTree.nodeCount())
-        .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
+            .arg(m_taskTree.nodeCount())
+            .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
         "system");
 
-    // TODO: m_mode = AgentMode::Execute; startExecute();
-    m_mode = AgentMode::Chat;
-    emit modeChanged(m_mode);
-    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
-
-    emit appendChat(
-        "<b>[System]</b> Plan bestätigt und gespeichert. "
-        "Execute-Modus folgt in der nächsten Session.", "system");
-    emit inputEnabled(true);
-    emit statusChanged("Plan gespeichert — bereit");
+    // Execute-Modus starten
+    startExecute();
 }
 
 void Agent::onPlanRejected()
@@ -385,6 +464,21 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     uint32_t mySession = m_sessionId;
 
+    if (m_updatingThoughts) {
+        m_updatingThoughts = false;
+
+        // Robustes Parsing: <think>-Blöcke, Nummerierung, Artefakte entfernen
+        m_executeMemory.parseFromLlmOutput(fullResponse);
+        m_executeMemory.save();
+
+        emit appendTools(
+            QString("<b>Thoughts aktualisiert:</b> %1 Einträge.")
+                .arg(m_executeMemory.count()), "system");
+
+        advanceExecute();
+        return;
+    }
+
     // ─── Plan-Modus ───────────────────────────────────────────────────────
     if (m_mode == AgentMode::Plan) {
         if (fullResponse.contains("<plan>") && fullResponse.contains("</plan>")) {
@@ -424,6 +518,68 @@ void Agent::onGenerationDone(const QString &fullResponse)
         m_inThinkBlock = false;
         emit appendChat("<b>Assistent:</b> ", "assistant");
         startGeneration(LlamaWorker::SamplerProfile::Chat);
+        return;
+    }
+
+    // ─── Thoughts-Update (nach jedem Execute-Node) ────────────────────────
+    // m_updatingThoughts ist true wenn updateThoughts() einen LLM-Aufruf
+    // gestartet hat. Der Output ist die neue Thoughts-Liste.
+    if (m_updatingThoughts) {
+        m_updatingThoughts = false;
+
+        // Thoughts-Liste aus Response parsen
+        // Format: eine Erkenntnis pro Zeile, kein Markdown, kein Prefix
+        QStringList newThoughts;
+        for (const QString &line : fullResponse.split('\n', Qt::SkipEmptyParts)) {
+            QString entry = line.trimmed();
+            // Nummerierung entfernen falls das Modell sie trotzdem hinzufügt
+            // "1. QTimer muss..." → "QTimer muss..."
+            if (entry.length() > 2 && entry[0].isDigit() && entry[1] == '.') {
+                entry = entry.mid(2).trimmed();
+            }
+            if (!entry.isEmpty() && entry.length() > 3)
+                newThoughts << entry;
+        }
+
+        m_executeMemory.setEntries(newThoughts);
+        m_executeMemory.save();
+
+        emit appendTools(
+            QString("<b>Thoughts aktualisiert:</b> %1 Einträge.")
+                .arg(newThoughts.size()), "system");
+
+        // Nächsten Node starten
+        advanceExecute();
+        return;
+    }
+
+    // ─── Execute-Modus ────────────────────────────────────────────────────
+    if (m_mode == AgentMode::Execute) {
+        if (isExecuteToolCall(fullResponse)) {
+            m_chatModel.addAssistantMessage(fullResponse);
+            handleExecuteToolCall(fullResponse, mySession);
+            return;
+        }
+        if (fullResponse.contains("<tool_call>") && !fullResponse.contains("</tool_call>")) {
+            ++m_continuationCount;
+            if (m_continuationCount > MAX_CONTINUATIONS) {
+                m_continuationCount = 0;
+                emit appendTools("Execute: Tool-Call unvollständig — Node als Failed.", "error");
+                if (m_currentNode) {
+                    m_taskTree.setStatus(m_currentNode, TaskStatus::Failed);
+                    m_taskTree.save();
+                    emit taskTreeUpdated();
+                }
+                advanceExecute();
+                return;
+            }
+            m_chatModel.addAssistantMessage(fullResponse);
+            m_generating = true; m_generatedTokens = 0;
+            startGeneration(LlamaWorker::SamplerProfile::Tool);
+            return;
+        }
+        m_continuationCount = 0;
+        handleExecuteCode(fullResponse, mySession);
         return;
     }
 
@@ -1278,3 +1434,494 @@ QString Agent::computeDiffHtml(const QString &before, const QString &after,
     html += "</pre>";
     return html;
 }
+
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EXECUTE-MODUS: NEUE METHODEN
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ─── startExecute ────────────────────────────────────────────────────────────
+// Wechselt in Execute-Modus, lädt Thoughts aus DB, startet ersten Node.
+//
+// Ablauf:
+//   1. Modus setzen
+//   2. Thoughts laden (aus SQLite, same DB wie TaskTree)
+//   3. frisches ChatModel für Execute-Kontext
+//   4. advanceExecute() — ersten Pending-Node holen und starten
+void Agent::startExecute()
+{
+    m_mode = AgentMode::Execute;
+    emit modeChanged(m_mode);
+
+    // Thoughts aus DB laden
+    const AppConfig &cfg = AppConfig::instance();
+    m_executeMemory.setDbPath(cfg.taskDbPath());
+    m_executeMemory.setMaxEntries(cfg.executeMemoryMaxEntries());
+    m_executeMemory.load();
+
+    emit appendTools(
+        QString("<b>Execute-Modus gestartet.</b> Thoughts: %1 Einträge.")
+            .arg(m_executeMemory.count()), "system");
+
+    if (!advanceExecute()) {
+        // Kein Pending-Node — alles schon Done?
+        emit appendChat("<b>[System]</b> Alle Nodes bereits erledigt.", "system");
+        m_mode = AgentMode::Chat;
+        emit modeChanged(m_mode);
+        m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+        emit inputEnabled(true);
+        emit statusChanged("Bereit");
+        emit executeFinished();
+    }
+}
+
+// ─── advanceExecute ──────────────────────────────────────────────────────────
+// NEU: buildPrompt wird jetzt im Node gespeichert (für Debugging).
+bool Agent::advanceExecute()
+{
+    TaskNode *node = m_taskTree.nextPending();
+    if (!node) {
+        emit appendTools("<b>Execute: alle Nodes abgearbeitet!</b>", "system");
+        emit executeFinished();
+        m_executeMemory.save();
+        m_mode = AgentMode::Chat;
+        emit modeChanged(m_mode);
+        m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+        emit inputEnabled(true);
+        emit statusChanged("Execute abgeschlossen");
+        return false;
+    }
+
+    m_currentNode = node;
+    m_taskTree.setStatus(node, TaskStatus::Running);
+    emit taskTreeUpdated();
+    emit executeNodeStarted(node->id);
+
+    // Prompt aufbauen
+    QString executePrompt = buildExecutePrompt(node);
+
+    // buildPrompt im Node speichern (Debugging: was hat das Modell gesehen?)
+    m_taskTree.setBuildPrompt(node, executePrompt);
+
+    // Frisches ChatModel für jeden Node
+    m_chatModel.clear();
+    m_chatModel.setSystemPrompt(buildExecuteSystemPrompt());
+    m_chatModel.addUserMessage(executePrompt);
+
+    m_currentResponse.clear();
+    m_thinkBuffer.clear();
+    m_inThinkBlock      = false;
+    m_generatedTokens   = 0;
+    m_generating        = true;
+    m_continuationCount = 0;
+
+    emit appendChat(
+        QString("<b>Execute Node:</b> %1 [%2]")
+            .arg(node->title.toHtmlEscaped(),
+                 TaskNode::levelName(node->level).toHtmlEscaped()),
+        "system");
+    emit appendChat("<b>Assistent (Execute):</b> ", "assistant");
+    emit inputEnabled(false);
+    emit statusChanged(QString("Execute: %1...").arg(node->title));
+
+    startGeneration(LlamaWorker::SamplerProfile::Chat);
+    return true;
+}
+
+// ─── buildExecuteSystemPrompt ────────────────────────────────────────────────
+// Dateityp-bewusster System-Prompt.
+//
+// Problem v1: "Gib NUR C++ Code aus" verwirrt das Modell bei CMakeLists.txt
+// Lösung v2: Dateityp aus Node-Titel ableiten, Prompt entsprechend anpassen
+//
+// Warum im System-Prompt und nicht im User-Prompt?
+//   Der System-Prompt definiert die Rolle und Ausgabe-Konvention.
+//   Der User-Prompt enthält die eigentliche Aufgabe.
+//   Beides zu mischen würde die Aufgabe unübersichtlicher machen.
+QString Agent::buildExecuteSystemPrompt() const
+{
+    // Dateityp aus aktuellem Node-Titel ableiten
+    QString lang = "Code";
+    QString fileTypeHint = "";
+    if (m_currentNode) {
+        lang = m_currentNode->languageName();
+        fileTypeHint = QString(
+                           "Du implementierst eine %1.\n"
+                           "Ausgabe: NUR %2-Code.\n\n"
+                           ).arg(m_currentNode->fileTypeDescription(), lang);
+    }
+
+    return QString(
+               "Du bist ein Implementierungs-Agent fuer C++/Qt6 Projekte.\n"
+               "\n"
+               "%1"
+               "AUSGABE-FORMAT (wichtig!):\n"
+               "Umschliesse deinen Code mit diesen Tags:\n"
+               "\n"
+               "<code>\n"
+               "...dein %2-Code hier...\n"
+               "</code>\n"
+               "\n"
+               "Kein Text vor <code>, kein Text nach </code>.\n"
+               "Kein Markdown (keine ```-Fences).\n"
+               "Nur der reine Code zwischen den Tags.\n"
+               "\n"
+               "LESE-TOOLS (bei Bedarf):\n"
+               "read_file, get_function_body, get_class_members, get_includes,\n"
+               "list_dir, get_symbol, search_code, grep_code, read_multiple_files,\n"
+               "web_search, get_time, sys_info, get_pwd\n"
+               "\n"
+               "VERBOTEN: write_file, str_replace, append_file, cmake_build\n"
+               "\n"
+               "WORKFLOW:\n"
+               "1. Lies zuerst was du brauchst (optional)\n"
+               "2. Implementiere dann die Aufgabe\n"
+               "3. Gib den Code zwischen <code>...</code> aus\n"
+               "\n"
+               "Antworte auf Deutsch wenn du Text ausgibst (z.B. bei Fehlern).\n"
+               "Fehler-Text AUSSERHALB der <code>-Tags schreiben.\n"
+               ).arg(fileTypeHint, lang);
+}
+
+// ─── buildExecutePrompt ──────────────────────────────────────────────────────
+// Lichtkegel für den aktuellen Node aufbauen.
+//
+// Struktur:
+//   [Thoughts]         — Kurzzeitgedächtnis (was bisher gelernt wurde)
+//   [Vertikaler Pfad]  — H0 → H1 → H2 → H3 (aktuell)
+//   [Abhängigkeiten]   — dependsOn-Nodes (Interfaces die dieser Node braucht)
+//   [Aufgabe]          — was genau zu implementieren ist
+//
+// Das ist der "Taschenlampen-Lichtkegel" — minimaler aber vollständiger Kontext.
+// Mehr würde das 9B-Modell überlasten, weniger wäre zu wenig.
+QString Agent::buildExecutePrompt(const TaskNode *node) const
+{
+    QString prompt;
+
+    // ── Thoughts ──────────────────────────────────────────────────────────
+    if (!m_executeMemory.isEmpty()) {
+        prompt += "## Bisherige Erkenntnisse (Thoughts)\n\n";
+        prompt += m_executeMemory.toPromptString();
+        prompt += "\n\n";
+    }
+
+    // ── Vertikaler Kontext (Pfad H0→aktuell) ─────────────────────────────
+    // verticalContext() aus TaskNode liefert den Pfad + description des aktuellen Nodes.
+    prompt += "## Aufgaben-Kontext\n\n";
+    prompt += node->verticalContext();
+    prompt += "\n";
+
+    // ── Horizontaler Kontext (dependsOn) ─────────────────────────────────
+    // buildContext() liefert bereits beides (vertikal + horizontal).
+    // Wir nutzen nur den horizontalen Teil direkt.
+    if (!node->dependsOn.isEmpty()) {
+        prompt += "\n## Abhängigkeiten (Interfaces die du nutzen darfst)\n\n";
+        for (qint64 depId : node->dependsOn) {
+            const TaskNode *dep = m_taskTree.findById(depId);
+            if (!dep) continue;
+            prompt += QString("### %1 [%2]\n").arg(dep->title, TaskNode::levelName(dep->level));
+            if (!dep->description.isEmpty())
+                prompt += dep->description + "\n";
+            // Falls der abhängige Node bereits Code hat (result) → mit ausgeben.
+            // Das ist der Charme: das Modell sieht das Interface direkt.
+            if (!dep->result.isEmpty()) {
+                prompt += "\n```cpp\n" + dep->result + "\n```\n";
+            }
+            prompt += "\n";
+        }
+    }
+
+    // ── Explizite Aufgabe ─────────────────────────────────────────────────
+    prompt += "## Deine Aufgabe\n\n";
+    prompt += QString("Implementiere: **%1**\n\n").arg(node->title);
+    if (!node->description.isEmpty())
+        prompt += node->description + "\n\n";
+    prompt += "Gib NUR den C++ Code aus. Kein Text davor oder danach.";
+
+    return prompt;
+}
+
+// ─── isExecuteToolCall ───────────────────────────────────────────────────────
+// Prüft ob der Output ein Tool-Call ist oder roher Code.
+// Tool-Call: beginnt mit <tool_call> (nach Whitespace/Thinking-Block).
+// Roher Code: alles andere.
+//
+// Warum nicht einfach contains("<tool_call>")?
+//   Weil roher Code Kommentare wie "// <tool_call>" enthalten könnte.
+//   Wir prüfen ob der Response einen vollständigen Tool-Call enthält.
+bool Agent::isExecuteToolCall(const QString &response) const
+{
+    return response.contains("<tool_call>") && response.contains("</tool_call>");
+}
+
+// ─── handleExecuteCode ───────────────────────────────────────────────────────
+// Verarbeitet den vollständigen LLM-Output im Execute-Modus.
+//
+// NEU gegenüber v1:
+//   - <code>...</code> Tags extrahieren → nur das landet in node->result
+//   - Alles außerhalb der Tags → node->sideOutput (Thinking, Erklärungen)
+//   - buildPrompt wird im Node gespeichert (für Debugging)
+//   - Markdown-Fences als Fallback wenn Tags fehlen
+//
+// Warum Tags statt rohem Code?
+//   Roher Code: Modell schreibt Erklärungen rein → schwer zu trennen
+//   Tags: eindeutige Grenze, Modell muss explizit "umschalten"
+//   Falls Tags fehlen (Modell folgt nicht): Fallback auf ganzen Response
+void Agent::handleExecuteCode(const QString &fullResponse, uint32_t sessionId)
+{
+    if (!m_currentNode) return;
+
+    QString code;
+    QString sideOut;
+
+    // ── Code aus <code>...</code> extrahieren ─────────────────────────────
+    int codeStart = fullResponse.indexOf("<code>");
+    int codeEnd   = fullResponse.indexOf("</code>");
+
+    if (codeStart >= 0 && codeEnd > codeStart) {
+        // Alles vor <code> → sideOutput (Thinking, Intro-Text)
+        sideOut = fullResponse.left(codeStart).trimmed();
+
+        // Code zwischen den Tags
+        code = fullResponse.mid(codeStart + 6, codeEnd - codeStart - 6).trimmed();
+
+        // Alles nach </code> → auch sideOutput (Erklärungen, Hinweise)
+        QString after = fullResponse.mid(codeEnd + 7).trimmed();
+        if (!after.isEmpty()) {
+            if (!sideOut.isEmpty()) sideOut += "\n\n";
+            sideOut += after;
+        }
+    } else {
+        // Fallback: keine Tags → ganzen Response als Code behandeln
+        // Markdown-Fences entfernen falls vorhanden
+        code = fullResponse.trimmed();
+        if (code.startsWith("```")) {
+            int firstNewline = code.indexOf('\n');
+            if (firstNewline > 0)
+                code = code.mid(firstNewline + 1);
+            if (code.endsWith("```"))
+                code.chop(3);
+            code = code.trimmed();
+        }
+        sideOut = "[Hinweis: Modell hat keine <code>-Tags verwendet. "
+                  "Gesamter Output als Code behandelt.]";
+
+        emit appendTools(
+            "<b>Execute:</b> Keine &lt;code&gt;-Tags gefunden — "
+            "Fallback auf gesamten Output.", "system");
+    }
+
+    // ── Thinking aus sideOutput entfernen (sauber für Anzeige) ───────────
+    // <think>-Blöcke landen im sideOutput aber wir wollen sie trotzdem
+    // sauber von anderem Text trennen.
+    static const QRegularExpression thinkRe(
+        "<think>.*?</think>",
+        QRegularExpression::DotMatchesEverythingOption);
+    sideOut.remove(thinkRe);
+    sideOut = sideOut.trimmed();
+
+    // ── In Node speichern ─────────────────────────────────────────────────
+    m_taskTree.setResult(m_currentNode, code);
+    m_taskTree.setSideOutput(m_currentNode, sideOut);
+    // buildPrompt wurde bereits in advanceExecute() gesetzt
+    m_taskTree.setStatus(m_currentNode, TaskStatus::Done);
+    m_taskTree.save();
+
+    emit appendTools(
+        QString("<b>Node fertig:</b> %1<br>"
+                "<small>%2 Zeichen Code | %3 Zeichen sideOutput</small>")
+            .arg(m_currentNode->title.toHtmlEscaped())
+            .arg(code.length())
+            .arg(sideOut.length()),
+        "system");
+
+    emit executeNodeDone(m_currentNode->id);
+    emit taskTreeUpdated();
+
+    // Thoughts nach jedem Node updaten
+    updateThoughts(m_currentNode, sessionId);
+}
+
+// ─── handleExecuteToolCall ───────────────────────────────────────────────────
+// Lese-Tool-Call im Execute-Modus verarbeiten.
+// Whitelist: EXECUTE_ALLOWED_TOOLS (Lesen + websearch, kein Schreiben).
+//
+// Fast identisch mit handlePlanToolCall() — gleiche Struktur,
+// andere Whitelist und anderer Kontext-String.
+void Agent::handleExecuteToolCall(const QString &fullResponse, uint32_t sessionId)
+{
+    int start     = fullResponse.indexOf("<tool_call>") + 11;
+    int end       = fullResponse.indexOf("</tool_call>", start);
+    QString block = fullResponse.mid(start, end - start).trimmed();
+
+    QJsonParseError pe;
+    QJsonDocument doc = QJsonDocument::fromJson(block.toUtf8(), &pe);
+
+    if (doc.isNull()) {
+        QString repaired = repairJson(block);
+        if (!repaired.isEmpty())
+            doc = QJsonDocument::fromJson(repaired.toUtf8());
+        else {
+            m_chatModel.addToolResult("json_error",
+                                      QString("[SYSTEM: Ungültiges JSON. Fehler: %1]").arg(pe.errorString()));
+            m_generating      = true;
+            m_generatedTokens = 0;
+            m_currentResponse.clear();
+            m_thinkBuffer.clear();
+            m_inThinkBlock = false;
+            emit appendChat("<b>Assistent (Execute):</b> ", "assistant");
+            startGeneration(LlamaWorker::SamplerProfile::Tool);
+            return;
+        }
+    }
+
+    QString     toolName = doc.object().value("name").toString();
+    QJsonObject toolArgs = doc.object().value("arguments").toObject();
+
+    emit appendTools(
+        QString("<b>Execute-Tool: %1</b><br><pre>%2</pre>")
+            .arg(toolName.toHtmlEscaped(),
+                 QString::fromUtf8(QJsonDocument(toolArgs)
+                                       .toJson(QJsonDocument::Indented)).toHtmlEscaped()),
+        "tool");
+
+    // Whitelist prüfen
+    if (!EXECUTE_ALLOWED_TOOLS.contains(toolName)) {
+        QString errMsg = QString(
+                             "[SYSTEM: Tool '%1' ist im Execute-Modus VERBOTEN. "
+                             "Nur Lese-Tools und websearch erlaubt. "
+                             "Implementiere den Code direkt ohne zu schreiben.]")
+                             .arg(toolName);
+        emit appendTools(
+            QString("Execute-Whitelist: <b>%1</b> verboten.").arg(toolName.toHtmlEscaped()),
+            "error");
+        m_chatModel.addToolResult(toolName, errMsg);
+        m_generating      = true;
+        m_generatedTokens = 0;
+        m_currentResponse.clear();
+        m_thinkBuffer.clear();
+        m_inThinkBlock = false;
+        emit appendChat("<b>Assistent (Execute):</b> ", "assistant");
+        startGeneration(LlamaWorker::SamplerProfile::Tool);
+        return;
+    }
+
+    if (!m_mcp.containsTool(toolName)) {
+        m_chatModel.addToolResult(toolName,
+                                  QString("Fehler: Tool '%1' nicht verfügbar.").arg(toolName));
+        m_generating      = true;
+        m_generatedTokens = 0;
+        startGeneration(LlamaWorker::SamplerProfile::Tool);
+        return;
+    }
+
+    emit statusChanged(QString("Execute-Tool: %1...").arg(toolName));
+    QString tKey = toolCallKey(toolName, toolArgs);
+
+    m_mcp.callTool(toolName, toolArgs,
+                   [this, toolName, tKey, sessionId](QString result, QString error) {
+                       if (sessionId != m_sessionId) return;
+
+                       QString toolResult = error.isEmpty() ? result : ("Fehler: " + error);
+                       bool    isErr      = !error.isEmpty();
+
+                       if (!isErr && toolResult.length() > AppConfig::instance().maxToolResultChars()) {
+                           int maxChars = AppConfig::instance().maxToolResultChars();
+                           int cut = toolResult.lastIndexOf('\n', maxChars);
+                           if (cut < maxChars / 2) cut = maxChars;
+                           toolResult = toolResult.left(cut)
+                                        + QString("\n\n[... gekürzt: %1 von %2 Zeichen.]")
+                                              .arg(cut).arg(result.length());
+                       }
+
+                       if (isErr) {
+                           int &failCount = m_toolFailCount[tKey];
+                           ++failCount;
+                           if (failCount >= DEADLOCK_ABORT) {
+                               emit appendTools(
+                                   QString("<b>Execute: DEADLOCK ABBRUCH</b> '%1'")
+                                       .arg(toolName.toHtmlEscaped()), "error");
+                               m_toolFailCount.remove(tKey);
+                               // Node als Failed markieren + nächsten versuchen
+                               if (m_currentNode) {
+                                   m_taskTree.setStatus(m_currentNode, TaskStatus::Failed);
+                                   m_taskTree.save();
+                                   emit taskTreeUpdated();
+                               }
+                               advanceExecute();
+                               return;
+                           }
+                           toolResult += "\n\n" + deadlockEscalationPrompt(toolName, failCount);
+                       } else {
+                           m_toolFailCount.remove(tKey);
+                       }
+
+                       emit appendTools(
+                           QString("<b>Execute-Ergebnis [%1]:</b><br><pre>%2</pre>")
+                               .arg(toolName.toHtmlEscaped(),
+                                    toolResult.left(800).toHtmlEscaped() +
+                                        (toolResult.length() > 800 ? "\n..." : "")),
+                           isErr ? "error" : "tool");
+
+                       m_chatModel.addToolResult(toolName, toolResult);
+                       m_generating      = true;
+                       m_generatedTokens = 0;
+                       m_currentResponse.clear();
+                       m_thinkBuffer.clear();
+                       m_inThinkBlock = false;
+                       emit appendChat("<b>Assistent (Execute):</b> ", "assistant");
+                       emit statusChanged("Execute läuft...");
+                       startGeneration(LlamaWorker::SamplerProfile::Chat);
+                   });
+}
+
+// ─── updateThoughts ──────────────────────────────────────────────────────────
+// NEU: parseFromLlmOutput() statt setEntries() — robustes Parsing.
+void Agent::updateThoughts(const TaskNode *node, uint32_t sessionId)
+{
+    m_updatingThoughts = true;
+
+    QString summarizePrompt = QString(
+                                  "Du hast gerade folgenden Node implementiert:\n"
+                                  "Titel: %1\n"
+                                  "Beschreibung: %2\n"
+                                  "\n"
+                                  "Bisherige Thoughts:\n"
+                                  "%3\n"
+                                  "\n"
+                                  "Aufgabe: Aktualisiere die Thoughts-Liste.\n"
+                                  "- Behalte wichtige Erkenntnisse aus der bisherigen Liste\n"
+                                  "- Fuege neue Erkenntnisse aus dieser Implementierung hinzu\n"
+                                  "- Entferne ueberholte oder unwichtige Eintraege\n"
+                                  "- Maximal %4 Eintraege\n"
+                                  "- Format: eine Erkenntnis pro Zeile\n"
+                                  "- KEINE Nummerierung (keine '1.', '2.' etc.)\n"
+                                  "- KEIN Markdown (keine **, keine ```)\n"
+                                  "- NUR die Liste ausgeben, kein anderer Text\n"
+                                  "- KEIN <think>-Block, direkt die Liste"
+                                  ).arg(node->title,
+                                       node->description,
+                                       m_executeMemory.toPromptString(),
+                                       QString::number(AppConfig::instance().executeMemoryMaxEntries()));
+
+    ChatModel summarizeModel;
+    summarizeModel.setChatTemplate(m_chatModel.chatTemplate());
+    summarizeModel.setSystemPrompt(
+        "Du bist ein Assistent der Kurzzeitgedaechtnis-Listen komprimiert. "
+        "Antworte NUR mit der Liste. Eine Erkenntnis pro Zeile. "
+        "Keine Nummerierung. Kein Markdown. Kein anderer Text.");
+    summarizeModel.addUserMessage(summarizePrompt);
+
+    m_currentResponse.clear();
+    m_thinkBuffer.clear();
+    m_inThinkBlock    = false;
+    m_generatedTokens = 0;
+    m_generating      = true;
+
+    emit statusChanged("Thoughts werden aktualisiert...");
+    m_chatModel = std::move(summarizeModel);
+    startGeneration(LlamaWorker::SamplerProfile::Chat);
+}
+
+

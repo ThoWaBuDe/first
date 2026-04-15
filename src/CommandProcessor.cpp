@@ -9,13 +9,10 @@ bool CommandProcessor::isCommand(const QString &text)
     return text.startsWith('/');
 }
 
-// ─── process ─────────────────────────────────────────────────────────────────
-// Pattern: Command Dispatcher — String → Handler-Methode.
 CommandProcessor::ProcessResult CommandProcessor::process(const QString &text,
-                                                          bool agentBusy)
+                                                           bool agentBusy)
 {
-    if (!isCommand(text))
-        return {};
+    if (!isCommand(text)) return {};
 
     if (agentBusy) {
         ProcessResult r;
@@ -41,7 +38,10 @@ CommandProcessor::ProcessResult CommandProcessor::process(const QString &text,
     if (cmd == "build")     return handleBuild(args);
     if (cmd == "compile")   return handleCompile(args);
     if (cmd == "run")       return handleRun(args);
-    if (cmd == "plan")      return handlePlan(args);       // NEU
+    if (cmd == "plan")      return handlePlan(args);
+    if (cmd == "execute")   return handleExecute(args);    // NEU
+    if (cmd == "savedb")    return handleSaveDB(args);     // NEU
+    if (cmd == "loaddb")    return handleLoadDB(args);     // NEU
     if (cmd == "summarize") return handleSummarize(args);
     if (cmd == "undo")      return handleUndo(args);
     if (cmd == "diff")      return handleDiff(args);
@@ -53,7 +53,6 @@ CommandProcessor::ProcessResult CommandProcessor::process(const QString &text,
     return r;
 }
 
-// ─── helpText ────────────────────────────────────────────────────────────────
 QString CommandProcessor::helpText()
 {
     return
@@ -63,23 +62,63 @@ QString CommandProcessor::helpText()
         "  /compile             — nur make\n"
         "  /run                 — cmake + make + Binary starten\n"
         "  /plan <Auftrag>      — Projekt analysieren + Aufgabenplan erstellen\n"
+        "  /execute             — Execute-Modus starten (nächster Pending-Node)\n"
+        "  /saveDB              — TaskTree + Thoughts in SQLite speichern\n"
+        "  /loadDB              — TaskTree + Thoughts aus SQLite laden\n"
         "  /summarize           — Konversation manuell zusammenfassen\n"
         "  /undo [Datei]        — letzten git-commit rückgängig\n"
         "  /diff                — git diff anzeigen";
 }
 
+// ─── handleExecute ───────────────────────────────────────────────────────────
+// Startet den Execute-Modus ab dem nächsten Pending-Node.
+//
+// Marker: "__EXECUTE__" → Agent::onUserMessage() erkennt ihn und
+// ruft startExecute() auf.
+//
+// Warum ein Marker statt Signal?
+//   CommandProcessor kennt Agent nicht (Dependency-Inversion).
+//   Konsistent mit "__PLAN__:" und "__SUMMARIZE__".
+CommandProcessor::ProcessResult CommandProcessor::handleExecute(const QStringList &args)
+{
+    Q_UNUSED(args)
+    ProcessResult r;
+    r.handled        = true;
+    r.prompt         = "__EXECUTE__";
+    r.notice         = "→ /execute — Execute-Modus wird gestartet...";
+    r.noticeCssClass = "system";
+    return r;
+}
+
+// ─── handleSaveDB ────────────────────────────────────────────────────────────
+// Speichert TaskTree + ExecuteMemory in SQLite.
+// Marker: "__SAVEDB__"
+CommandProcessor::ProcessResult CommandProcessor::handleSaveDB(const QStringList &args)
+{
+    Q_UNUSED(args)
+    ProcessResult r;
+    r.handled        = true;
+    r.prompt         = "__SAVEDB__";
+    r.notice         = "→ /saveDB — TaskTree + Thoughts werden gespeichert...";
+    r.noticeCssClass = "system";
+    return r;
+}
+
+// ─── handleLoadDB ────────────────────────────────────────────────────────────
+// Lädt TaskTree + ExecuteMemory aus SQLite.
+// Marker: "__LOADDB__"
+CommandProcessor::ProcessResult CommandProcessor::handleLoadDB(const QStringList &args)
+{
+    Q_UNUSED(args)
+    ProcessResult r;
+    r.handled        = true;
+    r.prompt         = "__LOADDB__";
+    r.notice         = "→ /loadDB — TaskTree + Thoughts werden geladen...";
+    r.noticeCssClass = "system";
+    return r;
+}
+
 // ─── handlePlan ──────────────────────────────────────────────────────────────
-// Startet den Plan-Modus.
-//
-// Der Auftrag wird als "__PLAN__:<text>" Marker zurückgegeben.
-// Agent::onUserMessage() erkennt diesen Marker und wechselt in AgentMode::Plan.
-//
-// Warum ein Marker statt einem eigenen Signal?
-//   CommandProcessor kennt den Agent nicht (Dependency-Inversion).
-//   Der Marker ist ein einfaches Protokoll über den bestehenden Kanal —
-//   analog zu "__SUMMARIZE__" das bereits funktioniert.
-//
-// Ohne Auftrag: Fehlermeldung (Plan braucht ein Ziel).
 CommandProcessor::ProcessResult CommandProcessor::handlePlan(const QStringList &args)
 {
     ProcessResult r;
@@ -93,7 +132,6 @@ CommandProcessor::ProcessResult CommandProcessor::handlePlan(const QStringList &
     }
 
     QString auftrag = args.join(' ');
-    // Sondermarker — Agent::onUserMessage() wertet ihn aus
     r.prompt         = "__PLAN__:" + auftrag;
     r.notice         = QString("→ /plan: %1").arg(auftrag);
     r.noticeCssClass = "system";
@@ -111,29 +149,15 @@ CommandProcessor::ProcessResult CommandProcessor::handleInit(const QStringList &
 
     r.prompt = QString(
         "Initialisiere ein neues C++/Qt6 Projekt namens '%1' in der Sandbox.\n\n"
-        "Führe folgende Schritte der Reihe nach aus:\n\n"
-        "1. Prüfe ob '%1/' existiert (list_dir root). Falls nicht: mkdir '%1'.\n\n"
-        "2. Ermittle das aktuelle Datum via get_time.\n\n"
-        "3. Lege '%1/.gitignore' an (write_file) mit Inhalt:\n"
-        "   build/\n*.o\n*.a\n*.so\n*.user\n.DS_Store\n\n"
-        "4. Lege '%1/AGENT.md' an (write_file) mit:\n"
-        "   # %1 — AGENT.md\n"
-        "   Erstellt: [Datum aus Schritt 2]\n"
-        "   ## Beschreibung\n(kurz)\n"
-        "   ## Verzeichnisstruktur\n(leer)\n"
-        "   ## Build\ncmake + make im build/-Verzeichnis\n"
-        "   ## TODOs\n- [ ] Projekt befüllen\n\n"
-        "5. Lege '%1/CMakeLists.txt' an falls nicht vorhanden:\n"
-        "   cmake_minimum_required(VERSION 3.16)\n"
-        "   project(%1)\n"
-        "   set(CMAKE_CXX_STANDARD 17)\n"
-        "   find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)\n"
-        "   add_executable(%1 src/main.cpp)\n"
-        "   target_link_libraries(%1 PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)\n\n"
-        "6. Lege '%1/src/' an (mkdir).\n\n"
-        "7. Zeige git_status und git_log um zu bestätigen dass das Repo läuft.\n\n"
-        "8. Bestätige mit einer Zusammenfassung was angelegt wurde.\n\n"
-        "Sandbox-Root: ~/llamatools/ | Ziel: ~/llamatools/%1/\n"
+        "Schritte:\n"
+        "1. Prüfe ob '%1/' existiert. Falls nicht: mkdir '%1'.\n"
+        "2. Ermittle das aktuelle Datum via get_time.\n"
+        "3. Lege '%1/.gitignore' an mit: build/\\n*.o\\n*.a\\n*.so\\n*.user\\n.DS_Store\n"
+        "4. Lege '%1/AGENT.md' an.\n"
+        "5. Lege '%1/CMakeLists.txt' an falls nicht vorhanden.\n"
+        "6. Lege '%1/src/' an.\n"
+        "7. Zeige git_status und git_log.\n"
+        "8. Bestätige mit Zusammenfassung.\n"
     ).arg(projectName);
 
     r.notice         = QString("→ /init %1").arg(projectName);
@@ -149,14 +173,10 @@ CommandProcessor::ProcessResult CommandProcessor::handleBuild(const QStringList 
     r.handled = true;
     QString project = m_currentProject.isEmpty() ? "." : m_currentProject;
     r.prompt = QString(
-        "Führe einen vollständigen Build des Projekts durch.\n\n"
-        "Schritte:\n"
+        "Führe einen vollständigen Build durch.\n\n"
         "1. Prüfe ob '%1/CMakeLists.txt' existiert.\n"
-        "2. Führe cmake_build aus:\n"
-        "   - source_dir: '%1'\n"
-        "   - build_dir:  '%1/build'\n"
-        "3. Berichte das Ergebnis: Erfolg oder Fehler mit Ursache.\n"
-        "4. Bei Fehler: Analysiere die Ausgabe und schlage eine Lösung vor.\n"
+        "2. cmake_build: source_dir '%1', build_dir '%1/build'\n"
+        "3. Berichte Erfolg oder Fehler mit Ursache.\n"
     ).arg(project);
     r.notice         = "→ /build";
     r.noticeCssClass = "system";
@@ -171,14 +191,10 @@ CommandProcessor::ProcessResult CommandProcessor::handleCompile(const QStringLis
     r.handled = true;
     QString project = m_currentProject.isEmpty() ? "." : m_currentProject;
     r.prompt = QString(
-        "Kompiliere das Projekt (nur make, kein cmake Re-Configure).\n\n"
-        "Schritte:\n"
+        "Kompiliere das Projekt (nur make).\n\n"
         "1. Prüfe ob '%1/build/CMakeCache.txt' existiert.\n"
-        "   Falls nicht: Weise darauf hin dass zuerst /build nötig ist.\n"
-        "2. Falls ja: Führe cmake_build aus mit:\n"
-        "   - source_dir: '%1'\n"
-        "   - build_dir:  '%1/build'\n"
-        "3. Berichte Erfolg oder Fehler.\n"
+        "2. cmake_build: source_dir '%1', build_dir '%1/build'\n"
+        "3. Berichte Ergebnis.\n"
     ).arg(project);
     r.notice         = "→ /compile";
     r.noticeCssClass = "system";
@@ -194,16 +210,10 @@ CommandProcessor::ProcessResult CommandProcessor::handleRun(const QStringList &a
     QString project = m_currentProject.isEmpty() ? "." : m_currentProject;
     r.prompt = QString(
         "Baue und starte das Projekt.\n\n"
-        "Schritte:\n"
-        "1. Prüfe ob '%1/build/CMakeCache.txt' existiert.\n"
-        "   Falls nicht: cmake_build mit source_dir '%1', build_dir '%1/build'.\n"
-        "2. Falls cmake_build nötig war: cmake_build erneut.\n"
-        "3. Suche das gebaute Binary: list_dir '%1/build/'.\n"
-        "4. Starte das Binary mit check_run:\n"
-        "   - binary: '%1/build/[BinaryName]'\n"
-        "   - danger_zone: true\n"
-        "   - timeout_ms: 8000\n"
-        "5. Berichte Exit-Code, Laufzeit, stdout und stderr.\n"
+        "1. cmake_build wenn nötig.\n"
+        "2. Binary suchen: list_dir '%1/build/'.\n"
+        "3. Binary starten: check_run mit danger_zone:true, timeout_ms:8000.\n"
+        "4. Berichte Exit-Code, stdout, stderr.\n"
     ).arg(project);
     r.notice         = "→ /run";
     r.noticeCssClass = "system";
@@ -230,22 +240,18 @@ CommandProcessor::ProcessResult CommandProcessor::handleUndo(const QStringList &
     QString file = args.isEmpty() ? "" : args.join(' ');
 
     if (file.isEmpty()) {
-        r.prompt = QString(
-            "Mache die letzte Änderung in der Sandbox rückgängig.\n\n"
-            "Schritte:\n"
-            "1. Zeige git_log (n=5).\n"
-            "2. Führe git_checkout aus mit ref='HEAD~1'.\n"
-            "3. Zeige git_status nach dem Checkout.\n"
-            "4. Berichte was zurückgesetzt wurde.\n"
-        );
+        r.prompt = "Mache die letzte Änderung rückgängig.\n\n"
+                   "1. git_log (n=5)\n"
+                   "2. git_checkout ref='HEAD~1'\n"
+                   "3. git_status\n"
+                   "4. Berichte was zurückgesetzt wurde.\n";
     } else {
         r.prompt = QString(
-            "Mache die letzte Änderung an '%1' rückgängig.\n\n"
-            "Schritte:\n"
-            "1. Zeige git_log (n=3).\n"
-            "2. Führe git_checkout aus: ref='HEAD~1', file='%1'.\n"
-            "3. Zeige git_diff.\n"
-            "4. Berichte das Ergebnis.\n"
+            "Mache letzte Änderung an '%1' rückgängig.\n\n"
+            "1. git_log (n=3)\n"
+            "2. git_checkout ref='HEAD~1', file='%1'\n"
+            "3. git_diff\n"
+            "4. Berichte Ergebnis.\n"
         ).arg(file);
     }
 
@@ -262,14 +268,13 @@ CommandProcessor::ProcessResult CommandProcessor::handleDiff(const QStringList &
     QString file = args.isEmpty() ? "" : args.join(' ');
 
     r.prompt = QString(
-        "Zeige die aktuellen Änderungen in der Sandbox%1.\n\n"
-        "Schritte:\n"
-        "1. Führe git_status aus.\n"
-        "2. Führe git_diff aus%2.\n"
+        "Zeige aktuelle Änderungen%1.\n\n"
+        "1. git_status\n"
+        "2. git_diff%2\n"
         "3. Erkläre kurz was sich geändert hat.\n"
     ).arg(
-        file.isEmpty() ? "" : QString(" für Datei '%1'").arg(file),
-        file.isEmpty() ? "" : QString(" mit file='%1'").arg(file)
+        file.isEmpty() ? "" : QString(" für '%1'").arg(file),
+        file.isEmpty() ? "" : QString(" file='%1'").arg(file)
     );
 
     r.notice         = "→ /diff";

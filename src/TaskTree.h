@@ -2,12 +2,11 @@
 // ─── TaskTree ─────────────────────────────────────────────────────────────────
 // Container für den hierarchischen Aufgabenbaum. RAM-first.
 //
-// Neu in v3:
-//   removeNode() — löscht Knoten + alle Kinder, bereinigt m_index
-//   clear()      — löscht kompletten RAM-Tree (DB bleibt erhalten)
+// Neu in v4:
+//   SQLite Schema um side_output + build_prompt erweitert
+//   Migration: ALTER TABLE für bestehende DBs
 
 #include "TaskNode.h"
-
 #include <QHash>
 #include <QSqlDatabase>
 #include <QSqlQuery>
@@ -30,12 +29,12 @@ public:
     }
 
     // ── Knoten erstellen ──────────────────────────────────────────────────────
-    TaskNode *createNode(const QString    &title,
-                         const QString    &description,
-                         int               level,
-                         TaskScope         scope  = TaskScope::Internal,
-                         int               order  = 0,
-                         TaskNode         *parent = nullptr)
+    TaskNode *createNode(const QString &title,
+                         const QString &description,
+                         int            level,
+                         TaskScope      scope  = TaskScope::Internal,
+                         int            order  = 0,
+                         TaskNode      *parent = nullptr)
     {
         TaskNode *node    = new TaskNode();
         node->id          = m_nextId++;
@@ -44,7 +43,7 @@ public:
         node->level       = level;
         node->scope       = scope;
         node->order       = order;
-        node->dirty       = true;   // neu erstellte Knoten müssen gespeichert werden
+        node->dirty       = true;
 
         if (parent) {
             parent->addChild(node);
@@ -58,7 +57,40 @@ public:
         return node;
     }
 
-    // ── Abhängigkeit hinzufügen ───────────────────────────────────────────────
+    // ── Knoten löschen ───────────────────────────────────────────────────────
+    void removeNode(TaskNode *node)
+    {
+        if (!node) return;
+        std::function<void(TaskNode*)> removeFromIndex = [&](TaskNode *n) {
+            m_index.remove(n->id);
+            for (TaskNode *child : n->children)
+                removeFromIndex(child);
+        };
+        removeFromIndex(node);
+
+        if (node->parent) {
+            node->parent->removeChild(node);
+        } else {
+            auto it = std::find(m_roots.begin(), m_roots.end(), node);
+            if (it != m_roots.end())
+                m_roots.erase(it);
+        }
+        delete node;
+        m_dirty = true;
+    }
+
+    // ── RAM-Tree leeren ───────────────────────────────────────────────────────
+    void clear()
+    {
+        for (TaskNode *root : m_roots)
+            delete root;
+        m_roots.clear();
+        m_index.clear();
+        m_nextId = 1;
+        m_dirty  = false;
+    }
+
+    // ── Abhängigkeiten ────────────────────────────────────────────────────────
     void addDependency(TaskNode *from, TaskNode *to)
     {
         if (!from || !to) return;
@@ -76,62 +108,11 @@ public:
         m_dirty     = true;
     }
 
-    // ── Knoten löschen ───────────────────────────────────────────────────────
-    // Löscht einen Knoten + alle Kinder rekursiv aus dem Tree.
-    // Bereinigt m_index für alle gelöschten Knoten.
-    //
-    // Analogie AVR: wie das Freigeben einer verketteten Liste — erst alle
-    // Folgeelemente (Kinder) aus dem Index entfernen, dann delete.
-    void removeNode(TaskNode *node)
-    {
-        if (!node) return;
-
-        // Schritt 1: alle Knoten aus m_index entfernen
-        std::function<void(TaskNode*)> removeFromIndex = [&](TaskNode *n) {
-            m_index.remove(n->id);
-            for (TaskNode *child : n->children)
-                removeFromIndex(child);
-        };
-        removeFromIndex(node);
-
-        // Schritt 2: aus Elter oder m_roots aushängen
-        if (node->parent) {
-            node->parent->removeChild(node);
-        } else {
-            auto it = std::find(m_roots.begin(), m_roots.end(), node);
-            if (it != m_roots.end())
-                m_roots.erase(it);
-        }
-
-        // Schritt 3: löschen (Destruktor löscht Kinder rekursiv)
-        delete node;
-        m_dirty = true;
-    }
-
-    // ── Kompletten RAM-Tree löschen ───────────────────────────────────────────
-    // DB bleibt unberührt — nur RAM-Zustand wird zurückgesetzt.
-    // Wird in Agent::startPlan() aufgerufen wenn /plan ein zweites Mal
-    // ausgeführt wird — frischer Start ohne alten Plan-Ballast.
-    //
-    // Analogie AVR: wie ein Buffer-Reset vor neuem DMA-Transfer.
-    void clear()
-    {
-        for (TaskNode *root : m_roots)
-            delete root;   // Destruktor löscht Kinder rekursiv
-        m_roots.clear();
-        m_index.clear();
-        m_nextId = 1;
-        m_dirty  = false;
-        // m_dbPath und m_db bleiben erhalten — kein erneutes setDbPath() nötig
-    }
-
     // ── Kontext für das Modell bauen ──────────────────────────────────────────
     QString buildContext(const TaskNode *node) const
     {
         if (!node) return {};
-
         QString ctx = node->verticalContext();
-
         if (!node->dependsOn.isEmpty()) {
             ctx += "\n--- Abhängigkeiten ---\n";
             for (qint64 depId : node->dependsOn) {
@@ -149,7 +130,7 @@ public:
         return ctx;
     }
 
-    // ── Status setzen + Propagation ───────────────────────────────────────────
+    // ── Status / Result setzen ────────────────────────────────────────────────
     void setStatus(TaskNode *node, TaskStatus status)
     {
         if (!node) return;
@@ -166,6 +147,24 @@ public:
         node->result    = result;
         node->dirty     = true;
         node->updatedAt = QDateTime::currentDateTime();
+        m_dirty = true;
+    }
+
+    void setSideOutput(TaskNode *node, const QString &sideOutput)
+    {
+        if (!node) return;
+        node->sideOutput = sideOutput;
+        node->dirty      = true;
+        node->updatedAt  = QDateTime::currentDateTime();
+        m_dirty = true;
+    }
+
+    void setBuildPrompt(TaskNode *node, const QString &prompt)
+    {
+        if (!node) return;
+        node->buildPrompt = prompt;
+        node->dirty       = true;
+        node->updatedAt   = QDateTime::currentDateTime();
         m_dirty = true;
     }
 
@@ -218,8 +217,8 @@ public:
         m_nextId = 1;
 
         QSqlQuery q("SELECT id, parent_id, level, scope, `order`, insertion_idx, "
-                    "title, description, result, depends_on, status, "
-                    "created_at, updated_at "
+                    "title, description, result, side_output, build_prompt, "
+                    "depends_on, status, created_at, updated_at "
                     "FROM tasks ORDER BY id", m_db);
 
         QHash<qint64, TaskNode*> loaded;
@@ -235,12 +234,14 @@ public:
             node->title       = q.value(6).toString();
             node->description = q.value(7).toString();
             node->result      = q.value(8).toString();
-            node->status      = TaskNode::statusFromString(q.value(10).toString());
-            node->createdAt   = QDateTime::fromString(q.value(11).toString(), Qt::ISODate);
-            node->updatedAt   = QDateTime::fromString(q.value(12).toString(), Qt::ISODate);
+            node->sideOutput  = q.value(9).toString();
+            node->buildPrompt = q.value(10).toString();
+            node->status      = TaskNode::statusFromString(q.value(12).toString());
+            node->createdAt   = QDateTime::fromString(q.value(13).toString(), Qt::ISODate);
+            node->updatedAt   = QDateTime::fromString(q.value(14).toString(), Qt::ISODate);
             node->dirty       = false;
 
-            const QString depsStr = q.value(9).toString();
+            const QString depsStr = q.value(11).toString();
             if (!depsStr.isEmpty()) {
                 for (const QString &s : depsStr.split(',', Qt::SkipEmptyParts))
                     node->dependsOn.append(s.trimmed().toLongLong());
@@ -345,6 +346,7 @@ private:
     {
         if (m_db.isOpen()) return true;
         if (m_dbPath.isEmpty()) { qWarning() << "TaskTree: no db path"; return false; }
+
         const QString connName = "taskdb_" + m_dbPath;
         if (QSqlDatabase::contains(connName)) {
             m_db = QSqlDatabase::database(connName);
@@ -352,11 +354,15 @@ private:
             m_db = QSqlDatabase::addDatabase("QSQLITE", connName);
             m_db.setDatabaseName(m_dbPath);
         }
+
         if (!m_db.open()) {
             qWarning() << "TaskTree:" << m_db.lastError().text();
             return false;
         }
+
         QSqlQuery q(m_db);
+
+        // Tabelle anlegen
         q.exec(
             "CREATE TABLE IF NOT EXISTS tasks ("
             "  id            INTEGER PRIMARY KEY,"
@@ -368,12 +374,32 @@ private:
             "  title         TEXT    NOT NULL,"
             "  description   TEXT,"
             "  result        TEXT,"
+            "  side_output   TEXT,"
+            "  build_prompt  TEXT,"
             "  depends_on    TEXT,"
             "  status        TEXT    DEFAULT 'pending',"
             "  created_at    TEXT,"
             "  updated_at    TEXT"
             ")"
         );
+
+        // ── Migration: neue Spalten für bestehende DBs hinzufügen ─────────────
+        // ALTER TABLE IF NOT EXISTS column wäre sauberer, aber SQLite unterstützt
+        // das nicht direkt. Wir versuchen die Spalten hinzuzufügen und ignorieren
+        // Fehler wenn sie bereits existieren.
+        // Analogie AVR: wie ein Bootloader der eine Firmware-Version prüft
+        // und nur fehlende Teile nachlädt.
+        auto addColumnIfMissing = [&](const QString &col, const QString &type) {
+            QSqlQuery check(m_db);
+            check.exec(QString("SELECT %1 FROM tasks LIMIT 1").arg(col));
+            if (check.lastError().isValid()) {
+                QSqlQuery alter(m_db);
+                alter.exec(QString("ALTER TABLE tasks ADD COLUMN %1 %2").arg(col, type));
+            }
+        };
+        addColumnIfMissing("side_output",  "TEXT");
+        addColumnIfMissing("build_prompt", "TEXT");
+
         return true;
     }
 
@@ -385,23 +411,26 @@ private:
         q.prepare(
             "INSERT OR REPLACE INTO tasks "
             "(id, parent_id, level, scope, `order`, insertion_idx, "
-            " title, description, result, depends_on, status, "
-            " created_at, updated_at) "
-            "VALUES (:id,:pid,:lv,:sc,:ord,:ins,:ti,:desc,:res,:dep,:st,:cr,:up)"
+            " title, description, result, side_output, build_prompt, "
+            " depends_on, status, created_at, updated_at) "
+            "VALUES (:id,:pid,:lv,:sc,:ord,:ins,:ti,:desc,:res,"
+            "        :sout,:bprompt,:dep,:st,:cr,:up)"
         );
-        q.bindValue(":id",   node->id);
-        q.bindValue(":pid",  node->parent ? node->parent->id : qint64(-1));
-        q.bindValue(":lv",   node->level);
-        q.bindValue(":sc",   TaskNode::scopeName(node->scope));
-        q.bindValue(":ord",  node->order);
-        q.bindValue(":ins",  node->insertionIdx);
-        q.bindValue(":ti",   node->title);
-        q.bindValue(":desc", node->description);
-        q.bindValue(":res",  node->result);
-        q.bindValue(":dep",  depStrs.join(','));
-        q.bindValue(":st",   TaskNode::statusName(node->status));
-        q.bindValue(":cr",   node->createdAt.toString(Qt::ISODate));
-        q.bindValue(":up",   node->updatedAt.toString(Qt::ISODate));
+        q.bindValue(":id",      node->id);
+        q.bindValue(":pid",     node->parent ? node->parent->id : qint64(-1));
+        q.bindValue(":lv",      node->level);
+        q.bindValue(":sc",      TaskNode::scopeName(node->scope));
+        q.bindValue(":ord",     node->order);
+        q.bindValue(":ins",     node->insertionIdx);
+        q.bindValue(":ti",      node->title);
+        q.bindValue(":desc",    node->description);
+        q.bindValue(":res",     node->result);
+        q.bindValue(":sout",    node->sideOutput);
+        q.bindValue(":bprompt", node->buildPrompt);
+        q.bindValue(":dep",     depStrs.join(','));
+        q.bindValue(":st",      TaskNode::statusName(node->status));
+        q.bindValue(":cr",      node->createdAt.toString(Qt::ISODate));
+        q.bindValue(":up",      node->updatedAt.toString(Qt::ISODate));
 
         if (!q.exec())
             qWarning() << "TaskTree::upsertNode:" << q.lastError().text();

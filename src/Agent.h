@@ -12,38 +12,20 @@
 #include "AppConfig.h"
 #include "ChatTemplate.h"
 #include "TaskTree.h"
+#include "ExecuteMemory.h"
 
-// ─── AgentMode ────────────────────────────────────────────────────────────────
-// Drei Modi des Agenten.
-//
-// Chat    — normaler Gesprächs-Modus
-// Plan    — Modell liest Projekt via Lese-Tools, gibt <plan>...</plan> aus
-// Execute — Modell arbeitet TaskTree-Knoten ab (folgt in nächster Session)
-//
-// Analogie AVR: FSM mit drei Zuständen.
-// Übergänge:
-//   Chat  → Plan     via /plan <Auftrag>
-//   Plan  → Chat     via Ablehnen oder Fehler
-//   Plan  → Execute  via Bestätigen (noch nicht implementiert)
-//   Execute → Chat   via Stop oder alle Tasks Done
-enum class AgentMode {
-    Chat,
-    Plan,
-    Execute,
-};
+enum class AgentMode { Chat, Plan, Execute };
 
 class Agent : public QObject {
     Q_OBJECT
-
 public:
     explicit Agent(const QString &modelPath, QObject *parent = nullptr);
     ~Agent() override;
-
     void start();
     LlamaWorker *worker() const { return m_worker; }
-
-    const TaskTree &taskTree() const { return m_taskTree; }
-    AgentMode mode() const           { return m_mode; }
+    const TaskTree      &taskTree()      const { return m_taskTree; }
+    const ExecuteMemory &executeMemory() const { return m_executeMemory; }
+    AgentMode mode() const { return m_mode; }
 
 public slots:
     void onUserMessage(const QString &text);
@@ -59,11 +41,13 @@ signals:
     void appendTools(const QString &html, const QString &cssClass);
     void statusChanged(const QString &text);
     void inputEnabled(bool enabled);
-    void statsUpdated(int promptTokens, int generatedTokens,
-                      int totalTokens,  int ctxSize);
+    void statsUpdated(int promptTokens, int generatedTokens, int totalTokens, int ctxSize);
     void planReady();
     void modeChanged(AgentMode mode);
     void taskTreeUpdated();
+    void executeNodeStarted(qint64 nodeId);
+    void executeNodeDone(qint64 nodeId);
+    void executeFinished();
 
 private slots:
     void onTokenReceived(const QString &token);
@@ -71,43 +55,46 @@ private slots:
     void onModelLoaded();
     void onStatsUpdate(int promptTokens, int ctxSize);
     void onError(const QString &error);
-    void onChatTemplateDetected(const QString &jinjaTemplate,
-                                ChatTemplate::Preset detectedPreset);
+    void onChatTemplateDetected(const QString &jinjaTemplate, ChatTemplate::Preset detectedPreset);
 
 private:
     void startGeneration(LlamaWorker::SamplerProfile profile);
 
-    // ─── Chat-Modus ───────────────────────────────────────────────────────
+    // Chat-Modus
     void handleToolCall(const QString &fullResponse, uint32_t sessionId);
     void filterToken(const QString &token);
     void emitStats();
     void checkContextUsage();
     void summarizeContext();
 
-    // ─── Plan-Modus ───────────────────────────────────────────────────────
+    // Plan-Modus
     void startPlan(const QString &auftrag);
     QString buildPlannerSystemPrompt(const QString &auftrag) const;
     void handlePlanToolCall(const QString &fullResponse, uint32_t sessionId);
     void handlePlanJson(const QString &fullResponse, uint32_t sessionId);
+    int  parsePlanNode(const QJsonObject &obj, TaskNode *parent, int depth,
+                       QHash<QString, qint64> &titleToId,
+                       QHash<qint64, QStringList> &pendingDeps);
 
-    // parsePlanNode: rekursiver Parser.
-    // titleToId   — Titel → Node-ID (für dependsOn-Auflösung zweiter Pass)
-    // pendingDeps — Node-ID → Titel-Liste (unaufgelöste dependsOn)
-    // Beide werden in handlePlanJson() deklariert und per Referenz übergeben.
-    int parsePlanNode(const QJsonObject &obj, TaskNode *parent, int depth,
-                      QHash<QString, qint64> &titleToId,
-                      QHash<qint64, QStringList> &pendingDeps);
+    // Execute-Modus
+    void startExecute();
+    bool advanceExecute();
+    QString buildExecuteSystemPrompt() const;
+    QString buildExecutePrompt(const TaskNode *node) const;
+    void handleExecuteCode(const QString &fullResponse, uint32_t sessionId);
+    void handleExecuteToolCall(const QString &fullResponse, uint32_t sessionId);
+    void updateThoughts(const TaskNode *node, uint32_t sessionId);
+    bool isExecuteToolCall(const QString &response) const;
 
-    // ─── Hilfsmethoden ────────────────────────────────────────────────────
-    QString computeDiffHtml(const QString &before, const QString &after,
-                            const QString &filename) const;
+    // Hilfsmethoden
+    QString computeDiffHtml(const QString &before, const QString &after, const QString &filename) const;
     QString toolCallKey(const QString &toolName, const QJsonObject &args) const;
     QString deadlockEscalationPrompt(const QString &toolName, int count) const;
     QString repairJson(const QString &broken) const;
     QString buildFullSystemPrompt() const;
     void    applyChatTemplate();
 
-    // ─── Member ───────────────────────────────────────────────────────────
+    // Member
     QString           m_modelPath;
     ChatModel         m_chatModel;
     McpManager        m_mcp;
@@ -116,22 +103,25 @@ private:
     QThread           m_workerThread;
     LlamaWorker      *m_worker = nullptr;
 
-    TaskTree    m_taskTree;
-    AgentMode   m_mode        = AgentMode::Chat;
-    TaskNode   *m_currentNode = nullptr;
-    int         m_planRetryCount = 0;
+    TaskTree      m_taskTree;
+    ExecuteMemory m_executeMemory;
+    AgentMode     m_mode        = AgentMode::Chat;
+    TaskNode     *m_currentNode = nullptr;
+    bool          m_updatingThoughts = false;
 
+    int m_planRetryCount = 0;
     static constexpr int MAX_PLAN_RETRIES = 1;
+
     static const QStringList PLAN_ALLOWED_TOOLS;
+    static const QStringList EXECUTE_ALLOWED_TOOLS;
 
-    uint32_t m_sessionId = 0;
-
-    bool    m_generating        = false;
-    QString m_currentResponse;
-    QString m_thinkBuffer;
-    bool    m_inThinkBlock      = false;
-    int     m_continuationCount = 0;
-    static constexpr int MAX_CONTINUATIONS = 3;
+    uint32_t m_sessionId        = 0;
+    bool     m_generating       = false;
+    QString  m_currentResponse;
+    QString  m_thinkBuffer;
+    bool     m_inThinkBlock     = false;
+    int      m_continuationCount = 0;
+    static constexpr int MAX_CONTINUATIONS    = 3;
     static constexpr int MAX_TOOL_RESULT_CHARS = 6000;
 
     QHash<QString, int> m_toolFailCount;

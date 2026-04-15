@@ -10,9 +10,7 @@ AppConfig &AppConfig::instance()
 
 AppConfig::AppConfig(QObject *parent)
     : QObject(parent)
-    , m_settings(QSettings::IniFormat,
-                 QSettings::UserScope,
-                 "LlamaQt", "LlamaQt")
+    , m_settings(QSettings::IniFormat, QSettings::UserScope, "LlamaQt", "LlamaQt")
 {
     load();
 }
@@ -20,12 +18,11 @@ AppConfig::AppConfig(QObject *parent)
 void AppConfig::load()
 {
     m_settings.beginGroup("Model");
-    m_modelPath   = m_settings.value("path",         m_modelPath).toString();
-    m_contextSize = m_settings.value("context_size", m_contextSize).toInt();
-    m_batchSize   = m_settings.value("batch_size",   m_batchSize).toInt();
+    m_modelPath          = m_settings.value("path",         m_modelPath).toString();
+    m_contextSize        = m_settings.value("context_size", m_contextSize).toInt();
+    m_batchSize          = m_settings.value("batch_size",   m_batchSize).toInt();
     m_chatTemplatePreset = static_cast<ChatTemplate::Preset>(
-        m_settings.value("chat_template_preset",
-            static_cast<int>(ChatTemplate::Preset::Auto)).toInt());
+        m_settings.value("chat_template_preset", static_cast<int>(ChatTemplate::Preset::Auto)).toInt());
     m_customChatTemplate = m_settings.value("custom_chat_template", "").toString();
     m_settings.endGroup();
 
@@ -44,14 +41,14 @@ void AppConfig::load()
     m_settings.endGroup();
 
     m_settings.beginGroup("Agent");
-    m_summarizeThreshold = m_settings.value("summarize_threshold",  m_summarizeThreshold).toInt();
-    m_maxContinuations   = m_settings.value("max_continuations",    m_maxContinuations).toInt();
-    m_deadlockWarn       = m_settings.value("deadlock_warn",        m_deadlockWarn).toInt();
-    m_deadlockRedirect   = m_settings.value("deadlock_redirect",    m_deadlockRedirect).toInt();
-    m_deadlockAbort      = m_settings.value("deadlock_abort",       m_deadlockAbort).toInt();
-    m_maxToolResultChars = m_settings.value("max_tool_result_chars",m_maxToolResultChars).toInt();
-    m_sandboxPath        = m_settings.value("sandbox_path",         m_sandboxPath).toString();
-    m_userSystemPrompt   = m_settings.value("user_system_prompt",   "").toString();
+    m_summarizeThreshold = m_settings.value("summarize_threshold",   m_summarizeThreshold).toInt();
+    m_maxContinuations   = m_settings.value("max_continuations",     m_maxContinuations).toInt();
+    m_deadlockWarn       = m_settings.value("deadlock_warn",         m_deadlockWarn).toInt();
+    m_deadlockRedirect   = m_settings.value("deadlock_redirect",     m_deadlockRedirect).toInt();
+    m_deadlockAbort      = m_settings.value("deadlock_abort",        m_deadlockAbort).toInt();
+    m_maxToolResultChars = m_settings.value("max_tool_result_chars", m_maxToolResultChars).toInt();
+    m_sandboxPath        = m_settings.value("sandbox_path",          m_sandboxPath).toString();
+    m_userSystemPrompt   = m_settings.value("user_system_prompt",    "").toString();
     m_settings.endGroup();
 
     m_settings.beginGroup("WebSearch");
@@ -67,23 +64,19 @@ void AppConfig::load()
 
     m_settings.beginGroup("ProjectIndex");
     m_indexSourceRoot  = "";
-    m_indexSandboxRoot = m_settings.value("sandbox_root",
-                            home + "/llamatools").toString();
-    m_indexCachePath   = m_settings.value("cache_path",
-                            home + "/.cache/llamaqt/index.md").toString();
+    m_indexSandboxRoot = m_settings.value("sandbox_root", home + "/llamatools").toString();
+    m_indexCachePath   = m_settings.value("cache_path",   home + "/.cache/llamaqt/index.md").toString();
     m_indexAutoRebuild = m_settings.value("auto_rebuild", true).toBool();
     m_settings.endGroup();
 
-    // ─── TaskTree ─────────────────────────────────────────────────────────
-    // Default: ~/llamatools/tasks.sqlite
-    // Liegt im Sandbox-Verzeichnis — pro-Projekt, sichtbar, versionierbar.
-    //
-    // Warum hier und nicht als Membervariablen-Initialisierer?
-    //   QDir::homePath() braucht Qt-Runtime — Membervariablen werden vor
-    //   dem QApplication-Konstruktor initialisiert. Daher hier in load().
     m_settings.beginGroup("TaskTree");
-    m_taskDbPath = m_settings.value("db_path",
-                       home + "/llamatools/tasks.sqlite").toString();
+    m_taskDbPath = m_settings.value("db_path", home + "/llamatools/tasks.sqlite").toString();
+    m_settings.endGroup();
+
+    m_settings.beginGroup("Execute");
+    m_executeMemoryMaxEntries = m_settings.value("memory_max_entries", m_executeMemoryMaxEntries).toInt();
+    m_executeAutoMode         = m_settings.value("auto_mode",          m_executeAutoMode).toBool();
+    m_executeSandboxProject   = m_settings.value("sandbox_project",    m_executeSandboxProject).toString();
     m_settings.endGroup();
 }
 
@@ -98,17 +91,13 @@ void AppConfig::save()
     m_settings.endGroup();
 
     m_settings.beginGroup("SamplerChat");
-    m_settings.setValue("top_k", m_chatTopK);
-    m_settings.setValue("temp",  m_chatTemp);
-    m_settings.setValue("top_p", m_chatTopP);
-    m_settings.setValue("min_p", m_chatMinP);
+    m_settings.setValue("top_k", m_chatTopK); m_settings.setValue("temp",  m_chatTemp);
+    m_settings.setValue("top_p", m_chatTopP); m_settings.setValue("min_p", m_chatMinP);
     m_settings.endGroup();
 
     m_settings.beginGroup("SamplerTool");
-    m_settings.setValue("top_k", m_toolTopK);
-    m_settings.setValue("temp",  m_toolTemp);
-    m_settings.setValue("top_p", m_toolTopP);
-    m_settings.setValue("min_p", m_toolMinP);
+    m_settings.setValue("top_k", m_toolTopK); m_settings.setValue("temp",  m_toolTemp);
+    m_settings.setValue("top_p", m_toolTopP); m_settings.setValue("min_p", m_toolMinP);
     m_settings.endGroup();
 
     m_settings.beginGroup("Agent");
@@ -138,9 +127,14 @@ void AppConfig::save()
     m_settings.setValue("auto_rebuild", m_indexAutoRebuild);
     m_settings.endGroup();
 
-    // ─── TaskTree ─────────────────────────────────────────────────────────
     m_settings.beginGroup("TaskTree");
     m_settings.setValue("db_path", m_taskDbPath);
+    m_settings.endGroup();
+
+    m_settings.beginGroup("Execute");
+    m_settings.setValue("memory_max_entries", m_executeMemoryMaxEntries);
+    m_settings.setValue("auto_mode",          m_executeAutoMode);
+    m_settings.setValue("sandbox_project",    m_executeSandboxProject);
     m_settings.endGroup();
 
     m_settings.sync();

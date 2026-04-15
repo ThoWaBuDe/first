@@ -2,15 +2,11 @@
 // ─── TaskNode ─────────────────────────────────────────────────────────────────
 // Ein Knoten im hierarchischen Aufgabenbaum des Coding-Agenten.
 //
-// Zwei Achsen:
-//   Vertikal   — Eltern/Kind (H0→H4+, Aufgaben-Hierarchie)
-//   Horizontal — dependsOn   (Abhängigkeiten zwischen beliebigen Knoten)
-//
-// dependsOn ist bewusst offen — kein Constraint auf H2 oder bestimmte Scopes.
-// Emergenz entscheidet welche Dependency-Typen sinnvoll sind.
-//
-// Ownership: Jeder Knoten besitzt seine Kinder (Destruktor löscht rekursiv).
-// Parent-Pointer ist nicht-owning.
+// Neu in v3:
+//   result      — NUR sauberer Code (aus <code>...</code> extrahiert)
+//   sideOutput  — Thinking-Blöcke, Warnungen, Erklärungen des Modells
+//   buildPrompt — der vollständige Prompt der ans Modell geschickt wurde
+//                 (Lichtkegel-Debugging: warum hat das Modell X ausgegeben?)
 
 #include <QString>
 #include <QDateTime>
@@ -21,44 +17,27 @@
 #include <algorithm>
 #include <functional>
 
-// ─── TaskLevel ────────────────────────────────────────────────────────────────
-// Benannte Konstanten für bekannte Ebenen.
-// Member `level` bleibt int — Tiefe ist flexibel (H5, H6, ... möglich).
-//
-// Verwendung:
-//   node->level = static_cast<int>(TaskLevel::Class);
-//   if (node->level == static_cast<int>(TaskLevel::Impl)) { ... }
-//   TaskNode::levelName(node->level)  → "H2:Klasse"
 enum class TaskLevel : int {
-    Goal       = 0,   // H0 — Gesamtziel
-    Files      = 1,   // H1 — Dateiliste
-    Class      = 2,   // H2 — Klasse / Übersetzungseinheit / Header
-    Impl       = 3,   // H3 — Implementierung (variabel, aufspaltbar)
-    Validation = 4,   // H4 — Validierung, Compilerfehler, Tests
-    // H5+ via direktem int — kein Maximum
+    Goal       = 0,
+    Files      = 1,
+    Class      = 2,
+    Impl       = 3,
+    Validation = 4,
 };
 
-// ─── TaskScope ────────────────────────────────────────────────────────────────
-// Klassenintern vs. öffentliches Interface.
-// Primär für H2, aber bewusst für alle Ebenen offen.
-//
-// Internal: private/protected — Implementierungsdetail einer Klasse
-// External: public — Interface das andere Klassen/Module nutzen
 enum class TaskScope : int {
     Internal = 0,
     External = 1,
 };
 
-// ─── TaskStatus ───────────────────────────────────────────────────────────────
 enum class TaskStatus : int {
-    Pending  = 0,   // grau
-    Running  = 1,   // gelb
-    Done     = 2,   // grün
-    Failed   = 3,   // rot
-    Blocked  = 4,   // orange (Kinder haben Fehler)
+    Pending  = 0,
+    Running  = 1,
+    Done     = 2,
+    Failed   = 3,
+    Blocked  = 4,
 };
 
-// ─── TaskNode ─────────────────────────────────────────────────────────────────
 struct TaskNode
 {
     // ── Identität ─────────────────────────────────────────────────────────────
@@ -71,15 +50,24 @@ struct TaskNode
     TaskScope scope = TaskScope::Internal;
 
     // ── Inhalt ────────────────────────────────────────────────────────────────
-    QString   title;        // Kurztitel (1 Zeile)
-    QString   description;  // Aufgabe + Kontext + Impl-Hints + Signaturen
-    QString   result;       // Was der Agent produziert hat
+    QString   title;
+    QString   description;
+
+    // ── Execute-Output (getrennt) ─────────────────────────────────────────────
+    // result:      NUR sauberer Code (aus <code>...</code> extrahiert)
+    //              Leer = noch nicht implementiert
+    // sideOutput:  Alles andere: Thinking, Warnungen, Erklärungen
+    //              Nützlich um zu verstehen was das Modell "gedacht" hat
+    // buildPrompt: Der vollständige Prompt (Lichtkegel: vertikal + horizontal + Thoughts)
+    //              Für Debugging: man sieht genau welchen Kontext das Modell bekam
+    //
+    // Analogie AVR: wie drei separate Register — result ist der Ausgang,
+    // sideOutput ist der Debug-Port, buildPrompt ist der Trace-Buffer.
+    QString   result;
+    QString   sideOutput;
+    QString   buildPrompt;
 
     // ── Horizontale Abhängigkeiten ────────────────────────────────────────────
-    // IDs beliebiger anderer Knoten. Offen — keine Einschränkung auf H2.
-    // Gesetzt vom Planner oder manuell im UI.
-    // TaskTree::buildContext() löst diese IDs auf und hängt
-    // Titel + Description der Zielknoten an den Modell-Kontext an.
     QList<qint64> dependsOn;
 
     // ── Status ────────────────────────────────────────────────────────────────
@@ -89,10 +77,9 @@ struct TaskNode
     bool       dirty     = false;
 
     // ── Baum-Struktur ─────────────────────────────────────────────────────────
-    TaskNode              *parent   = nullptr;   // nicht-owning
-    std::vector<TaskNode*> children;              // owning
+    TaskNode              *parent   = nullptr;
+    std::vector<TaskNode*> children;
 
-    // ── Konstruktor / Destruktor ───────────────────────────────────────────────
     TaskNode()
         : createdAt(QDateTime::currentDateTime())
         , updatedAt(QDateTime::currentDateTime())
@@ -105,8 +92,6 @@ struct TaskNode
 
     TaskNode(const TaskNode &) = delete;
     TaskNode &operator=(const TaskNode &) = delete;
-
-    // ── Kinder-Verwaltung ─────────────────────────────────────────────────────
 
     void addChild(TaskNode *child) {
         child->parent       = this;
@@ -125,8 +110,6 @@ struct TaskNode
         return child;
     }
 
-    // ── Abfragen ──────────────────────────────────────────────────────────────
-
     bool allChildrenDone() const {
         if (children.empty()) return false;
         for (const TaskNode *c : children)
@@ -137,12 +120,8 @@ struct TaskNode
     bool isLeaf() const { return children.empty(); }
     bool isRoot() const { return parent == nullptr; }
 
-    // Bequemer Zugriff auf das enum
-    TaskLevel taskLevel() const {
-        return static_cast<TaskLevel>(level);
-    }
+    TaskLevel taskLevel() const { return static_cast<TaskLevel>(level); }
 
-    // Pfad von Wurzel bis zu diesem Knoten
     std::vector<const TaskNode*> pathFromRoot() const {
         std::vector<const TaskNode*> path;
         const TaskNode *n = this;
@@ -151,8 +130,6 @@ struct TaskNode
         return path;
     }
 
-    // Vertikaler Kontext (Pfad H0→aktuell).
-    // Horizontaler Teil (dependsOn) wird von TaskTree::buildContext() ergänzt.
     QString verticalContext() const {
         QString ctx;
         for (const TaskNode *n : pathFromRoot()) {
@@ -166,8 +143,53 @@ struct TaskNode
         return ctx;
     }
 
-    // ── String-Konvertierungen ────────────────────────────────────────────────
+    // ── Dateityp-Erkennung ────────────────────────────────────────────────────
+    // Wird von buildExecuteSystemPrompt() genutzt um dem Modell zu sagen
+    // welche Sprache es ausgeben soll.
+    enum class FileType { Cpp, CppHeader, CMake, Python, Text, Unknown };
 
+    FileType fileType() const {
+        QString t = title.toLower().trimmed();
+        if (t.endsWith(".cpp") || t.endsWith(".cc") || t.endsWith(".cxx"))
+            return FileType::Cpp;
+        if (t.endsWith(".h") || t.endsWith(".hpp") || t.endsWith(".hxx"))
+            return FileType::CppHeader;
+        if (t == "cmakelists.txt" || t.endsWith(".cmake"))
+            return FileType::CMake;
+        if (t.endsWith(".py"))
+            return FileType::Python;
+        if (t.endsWith(".txt") || t.endsWith(".md"))
+            return FileType::Text;
+        return FileType::Unknown;
+    }
+
+    // Beschreibung des Dateityps für den System-Prompt
+    QString fileTypeDescription() const {
+        switch (fileType()) {
+            case FileType::Cpp:       return "C++ Implementierungsdatei (.cpp)";
+            case FileType::CppHeader: return "C++ Header-Datei (.h)";
+            case FileType::CMake:     return "CMake Build-Konfigurationsdatei";
+            case FileType::Python:    return "Python-Skript (.py)";
+            case FileType::Text:      return "Textdatei";
+            case FileType::Unknown:   return "Quellcode-Datei";
+        }
+        return "Quellcode-Datei";
+    }
+
+    // Sprachname für den System-Prompt ("C++", "CMake", ...)
+    QString languageName() const {
+        switch (fileType()) {
+            case FileType::Cpp:
+            case FileType::CppHeader: return "C++";
+            case FileType::CMake:     return "CMake";
+            case FileType::Python:    return "Python";
+            case FileType::Text:      return "Text";
+            case FileType::Unknown:   return "Code";
+        }
+        return "Code";
+    }
+
+    // ── String-Konvertierungen ────────────────────────────────────────────────
     static QString levelName(int l) {
         switch (l) {
             case static_cast<int>(TaskLevel::Goal):       return "H0:Ziel";
@@ -204,7 +226,6 @@ struct TaskNode
         return TaskStatus::Pending;
     }
 
-    // ── Serialisierung ────────────────────────────────────────────────────────
     QJsonObject toJson() const {
         QJsonArray deps;
         for (qint64 d : dependsOn) deps.append(d);
@@ -218,6 +239,8 @@ struct TaskNode
             {"title",         title},
             {"description",   description},
             {"result",        result},
+            {"side_output",   sideOutput},
+            {"build_prompt",  buildPrompt},
             {"depends_on",    deps},
             {"status",        statusName(status)},
             {"created_at",    createdAt.toString(Qt::ISODate)},
