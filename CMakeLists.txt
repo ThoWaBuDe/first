@@ -52,6 +52,7 @@ set(HEADERS
     src/TaskNodeDialog.h
     src/ExecuteMemory.h
     src/CodeAssembler.h
+    src/NodeGraphView.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}

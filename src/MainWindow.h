@@ -6,6 +6,7 @@
 #include "ConfigDialog.h"
 #include "EditorDock.h"
 #include "PlannerDock.h"
+#include "NodeGraphView.h"
 
 namespace Ui { class MainWindow; }
 
@@ -39,6 +40,11 @@ private slots:
     // Modus-Änderung: PlannerDock ein-/ausblenden
     void onModeChanged(AgentMode mode);
 
+ //   void onShowGraph();
+
+    void onRefreshGraph();
+
+
 private:
     void setupUi();
     void setupConnections();
@@ -50,6 +56,7 @@ private:
     Agent          *m_agent;
     EditorDock     *m_editorDock;
     PlannerDock    *m_plannerDock;   // NEU
+    NodeGraphView *m_graphView = nullptr;
 
     static constexpr int AUTOSCROLL_THRESHOLD = 20;
 };

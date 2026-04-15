@@ -996,20 +996,36 @@ void Agent::handlePlanJson(const QString &fullResponse, uint32_t sessionId)
     // forward references können aufgelöst werden.
     int resolvedDeps   = 0;
     int unresolvedDeps = 0;
+
     for (auto it = pendingDeps.constBegin(); it != pendingDeps.constEnd(); ++it) {
         TaskNode *node = m_taskTree.findById(it.key());
         if (!node) continue;
 
         for (const QString &depTitle : it.value()) {
+            // Versuch 1: exakter Match
             qint64 depId = titleToId.value(depTitle, -1);
-            if (depId >= 0) {
+
+            // Versuch 2: Substring-Match (Planner schreibt Kurztitel)
+            if (depId < 0) {
+                for (auto jt = titleToId.constBegin(); jt != titleToId.constEnd(); ++jt) {
+                    // "CMakeLists.txt" ist Substring von "CMakeLists.txt erstellen"
+                    // oder umgekehrt
+                    if (jt.key().contains(depTitle, Qt::CaseInsensitive) ||
+                        depTitle.contains(jt.key(), Qt::CaseInsensitive)) {
+                        depId = jt.value();
+                        break;
+                    }
+                }
+            }
+
+            if (depId >= 0 && depId != node->id) {
                 m_taskTree.addDependency(node, m_taskTree.findById(depId));
                 ++resolvedDeps;
             } else {
                 ++unresolvedDeps;
                 emit appendTools(
                     QString("<b>dependsOn nicht aufgelöst:</b> '%1' → '%2'")
-                    .arg(node->title.toHtmlEscaped(), depTitle.toHtmlEscaped()),
+                        .arg(node->title.toHtmlEscaped(), depTitle.toHtmlEscaped()),
                     "system");
             }
         }
@@ -1629,29 +1645,58 @@ QString Agent::buildExecutePrompt(const TaskNode *node) const
     }
 
     // ── Vertikaler Kontext (Pfad H0→aktuell) ─────────────────────────────
-    // verticalContext() aus TaskNode liefert den Pfad + description des aktuellen Nodes.
     prompt += "## Aufgaben-Kontext\n\n";
     prompt += node->verticalContext();
     prompt += "\n";
 
-    // ── Horizontaler Kontext (dependsOn) ─────────────────────────────────
-    // buildContext() liefert bereits beides (vertikal + horizontal).
-    // Wir nutzen nur den horizontalen Teil direkt.
+    // ── Horizontaler Kontext (dependsOn) ──────────────────────────────────
     if (!node->dependsOn.isEmpty()) {
         prompt += "\n## Abhängigkeiten (Interfaces die du nutzen darfst)\n\n";
         for (qint64 depId : node->dependsOn) {
             const TaskNode *dep = m_taskTree.findById(depId);
             if (!dep) continue;
-            prompt += QString("### %1 [%2]\n").arg(dep->title, TaskNode::levelName(dep->level));
+            prompt += QString("### %1 [%2]\n")
+                          .arg(dep->title, TaskNode::levelName(dep->level));
             if (!dep->description.isEmpty())
                 prompt += dep->description + "\n";
-            // Falls der abhängige Node bereits Code hat (result) → mit ausgeben.
-            // Das ist der Charme: das Modell sieht das Interface direkt.
+            // Falls der abhängige Node bereits Code hat → Interface zeigen
             if (!dep->result.isEmpty()) {
-                prompt += "\n```cpp\n" + dep->result + "\n```\n";
+                prompt += "\n```\n" + dep->result + "\n```\n";
             }
             prompt += "\n";
         }
+    }
+
+    // ── NEU: Bereits fertige Geschwister-Nodes als Kontext ────────────────
+    // Problem: H3-Nodes überlappen sich wenn sie dasselbe implementieren.
+    // Lösung: Das Modell sieht was die vorherigen Geschwister bereits
+    // produziert haben — es kann darauf aufbauen statt es zu wiederholen.
+    //
+    // Analogie AVR: wie ein Linker der weiß welche Symbole bereits definiert
+    // sind — kein doppeltes Definieren möglich.
+    if (node->parent && !node->parent->children.empty()) {
+        bool hasFinishedSiblings = false;
+        QString siblingContext;
+
+        for (const TaskNode *sibling : node->parent->children) {
+            // Nur bereits fertige Geschwister (Done) die VOR diesem Node kommen
+            if (sibling == node) break;  // stop bei aktuellem Node
+            if (sibling->status != TaskStatus::Done) continue;
+            if (sibling->result.isEmpty()) continue;
+
+            if (!hasFinishedSiblings) {
+                siblingContext += "\n## Bereits implementierte Geschwister-Nodes\n\n";
+                siblingContext += "(Diese Implementierungen existieren bereits — "
+                                  "baue darauf auf, wiederhole sie nicht)\n\n";
+                hasFinishedSiblings = true;
+            }
+
+            siblingContext += QString("### %1 (fertig)\n").arg(sibling->title);
+            siblingContext += "```\n" + sibling->result + "\n```\n\n";
+        }
+
+        if (hasFinishedSiblings)
+            prompt += siblingContext;
     }
 
     // ── Explizite Aufgabe ─────────────────────────────────────────────────
@@ -1659,10 +1704,23 @@ QString Agent::buildExecutePrompt(const TaskNode *node) const
     prompt += QString("Implementiere: **%1**\n\n").arg(node->title);
     if (!node->description.isEmpty())
         prompt += node->description + "\n\n";
-    prompt += "Gib NUR den C++ Code aus. Kein Text davor oder danach.";
+
+    // H2-Blatt vs H2-Container Hinweis
+    if (node->level == static_cast<int>(TaskLevel::Class)) {
+        if (node->children.empty()) {
+            prompt += "Dieser Node ist ein Blatt — produziere die **vollständige Datei**.\n\n";
+        } else {
+            prompt += "Dieser Node ist ein Container — produziere nur den **Datei-Kopf** "
+                      "(includes, Klassen-Deklaration, Boilerplate). "
+                      "Die Methoden-Implementierungen kommen in den H3-Nodes.\n\n";
+        }
+    }
+
+    prompt += "Gib den Code zwischen <code>...</code> aus. Kein Text davor oder danach.";
 
     return prompt;
 }
+
 
 // ─── isExecuteToolCall ───────────────────────────────────────────────────────
 // Prüft ob der Output ein Tool-Call ist oder roher Code.

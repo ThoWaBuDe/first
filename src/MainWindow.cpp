@@ -61,6 +61,13 @@ void MainWindow::setupUi()
     // toggleViewAction() liefert eine QAction die den Dock ein-/ausblendet.
     // Qt erstellt sie automatisch für jeden QDockWidget.
 
+    connect(m_graphView, &QDockWidget::visibilityChanged,
+            this, [this](bool visible) {
+                if (visible)
+                    m_graphView->refresh(m_agent->taskTree());
+            });
+
+
     // ─── chatView ──────────────────────────────────────────────────────────
     ui->chatView->document()->setDefaultStyleSheet(R"(
         body       { font-family: 'Noto Sans', sans-serif; font-size: 13px; }
@@ -113,6 +120,25 @@ void MainWindow::setupUi()
     QAction *quitAction = fileMenu->addAction("Beenden");
     quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, this, &QMainWindow::close);
+
+    // NodeGraphView — initial versteckt, togglebar über Ansicht-Menü
+    m_graphView = new NodeGraphView(this);
+    addDockWidget(Qt::RightDockWidgetArea, m_graphView);
+    m_graphView->hide();
+
+    // Im Ansicht-Menü eintragen
+    viewMenu->addAction(m_graphView->toggleViewAction());
+
+    // Graph aktualisieren wenn TaskTree sich ändert
+    connect(m_agent, &Agent::taskTreeUpdated,
+            this,    &MainWindow::onRefreshGraph);
+
+    // Node selektiert → PlannerDock synchronisieren (optional)
+    connect(m_graphView, &NodeGraphView::nodeSelected,
+            this, [this](qint64 nodeId) {
+                // TODO: PlannerDock auf diesen Node scrollen
+                Q_UNUSED(nodeId)
+            });
 }
 
 // ─── eventFilter ─────────────────────────────────────────────────────────────
@@ -215,6 +241,12 @@ void MainWindow::onModeChanged(AgentMode mode)
         m_plannerDock->raise();
     }
     // Bei Chat/Execute: Dock bleibt wie es ist (User entscheidet)
+}
+
+void MainWindow::onRefreshGraph()
+{
+    if (m_graphView && m_graphView->isVisible())
+        m_graphView->refresh(m_agent->taskTree());
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
