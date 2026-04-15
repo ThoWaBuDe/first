@@ -353,6 +353,13 @@ QWidget *ConfigDialog::createExecuteTab()
         "Der Agent wartet auf diese Tags und verarbeitet dann das Ergebnis.\n"
         "Deaktiviert: zukünftige manuelle Granularität (noch nicht implementiert).");
     modeLayout->addWidget(m_executeAutoMode);
+    m_assembleOnlyDone = new QCheckBox(
+            "Nur Done-Nodes assemblieren (empfohlen)");
+    m_assembleOnlyDone->setToolTip(
+            "Aktiviert: nur Nodes mit Status 'Done' werden zu Dateien.\n"
+            "Deaktiviert: alle Nodes mit nicht-leerem result werden assembliert\n"
+           "(auch laufende oder fehlgeschlagene Nodes).");
+    modeLayout->addWidget(m_assembleOnlyDone);
 
     auto *modeHint = new QLabel(
         "<small style='color:#888'>"
@@ -466,6 +473,8 @@ void ConfigDialog::loadFromConfig()
     m_executeAutoMode->setChecked(cfg.executeAutoMode());
     m_executeSandboxProject->setText(cfg.executeSandboxProject());
 
+    m_assembleOnlyDone->setChecked(cfg.assembleOnlyDone());
+
     // Flags zurücksetzen
     m_samplersChanged = false;
     m_restartNeeded   = false;
@@ -521,6 +530,8 @@ void ConfigDialog::saveToConfig()
     cfg.setExecuteMemoryMaxEntries(m_executeMemoryMaxEntries->value());
     cfg.setExecuteAutoMode(m_executeAutoMode->isChecked());
     cfg.setExecuteSandboxProject(m_executeSandboxProject->text());
+
+    cfg.setAssembleOnlyDone(m_assembleOnlyDone->isChecked());
 
     cfg.save();
 }

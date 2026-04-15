@@ -45,6 +45,7 @@ CommandProcessor::ProcessResult CommandProcessor::process(const QString &text,
     if (cmd == "summarize") return handleSummarize(args);
     if (cmd == "undo")      return handleUndo(args);
     if (cmd == "diff")      return handleDiff(args);
+    if (cmd == "codeassemble") return handleCodeAssemble(args);
 
     ProcessResult r;
     r.handled        = true;
@@ -67,7 +68,19 @@ QString CommandProcessor::helpText()
         "  /loadDB              — TaskTree + Thoughts aus SQLite laden\n"
         "  /summarize           — Konversation manuell zusammenfassen\n"
         "  /undo [Datei]        — letzten git-commit rückgängig\n"
-        "  /diff                — git diff anzeigen";
+        "  /diff                — git diff anzeigen\n"
+        "  /codeAssemble        — Nodes zu Dateien assemblieren\n";
+}
+
+CommandProcessor::ProcessResult CommandProcessor::handleCodeAssemble(const QStringList &args)
+{
+    Q_UNUSED(args)
+    ProcessResult r;
+    r.handled        = true;
+    r.prompt         = "__CODEASSEMBLE__";
+    r.notice         = "→ /codeAssemble — Nodes werden zu Dateien assembliert...";
+    r.noticeCssClass = "system";
+    return r;
 }
 
 // ─── handleExecute ───────────────────────────────────────────────────────────

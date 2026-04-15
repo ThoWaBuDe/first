@@ -78,6 +78,10 @@ void AppConfig::load()
     m_executeAutoMode         = m_settings.value("auto_mode",          m_executeAutoMode).toBool();
     m_executeSandboxProject   = m_settings.value("sandbox_project",    m_executeSandboxProject).toString();
     m_settings.endGroup();
+
+    m_assembleOnlyDone = m_settings.value("assemble_only_done",
+                         m_assembleOnlyDone).toBool();
+
 }
 
 void AppConfig::save()
@@ -136,6 +140,8 @@ void AppConfig::save()
     m_settings.setValue("auto_mode",          m_executeAutoMode);
     m_settings.setValue("sandbox_project",    m_executeSandboxProject);
     m_settings.endGroup();
+
+    m_settings.setValue("assemble_only_done", m_assembleOnlyDone);
 
     m_settings.sync();
 }

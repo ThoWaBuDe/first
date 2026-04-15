@@ -13,6 +13,7 @@
 #include "ChatTemplate.h"
 #include "TaskTree.h"
 #include "ExecuteMemory.h"
+#include "CodeAssembler.h"
 
 enum class AgentMode { Chat, Plan, Execute };
 
@@ -86,6 +87,8 @@ private:
     void updateThoughts(const TaskNode *node, uint32_t sessionId);
     bool isExecuteToolCall(const QString &response) const;
 
+    void assembleProject();
+
     // Hilfsmethoden
     QString computeDiffHtml(const QString &before, const QString &after, const QString &filename) const;
     QString toolCallKey(const QString &toolName, const QJsonObject &args) const;
@@ -136,6 +139,8 @@ private:
     int m_totalTokens     = 0;
     int m_promptTokens    = 0;
     int m_ctxSize         = 0;
+
+    CodeAssembler m_assembler;
 
     ChatTemplate::Preset m_detectedPreset = ChatTemplate::Preset::ChatML;
 };

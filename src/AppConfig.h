@@ -90,6 +90,8 @@ public:
     void setExecuteAutoMode(bool v)             { m_executeAutoMode = v; save(); }
     QString executeSandboxProject() const           { return m_executeSandboxProject; }
     void setExecuteSandboxProject(const QString &v) { m_executeSandboxProject = v; save(); }
+    bool    assembleOnlyDone() const         { return m_assembleOnlyDone; }
+    void setAssembleOnlyDone(bool v)         { m_assembleOnlyDone = v; save(); }
 
 signals:
     void chatLoggingChanged(bool enabled);
@@ -131,4 +133,6 @@ private:
     int     m_executeMemoryMaxEntries = 50;
     bool    m_executeAutoMode         = true;
     QString m_executeSandboxProject   = "";
+
+    bool m_assembleOnlyDone = true;
 };

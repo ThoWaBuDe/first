@@ -94,6 +94,7 @@ private:
     QSpinBox  *m_executeMemoryMaxEntries;  // Thoughts-Obergrenze
     QCheckBox *m_executeAutoMode;          // Modell entscheidet Granularität
     QLineEdit *m_executeSandboxProject;    // Unterverzeichnis in ~/llamatools/
+    QCheckBox *m_assembleOnlyDone;
 
     bool m_samplersChanged  = false;
     bool m_restartNeeded    = false;

@@ -39,6 +39,7 @@ private:
     ProcessResult handleSummarize(const QStringList &args);
     ProcessResult handleUndo(const QStringList &args);
     ProcessResult handleDiff(const QStringList &args);
+    ProcessResult handleCodeAssemble(const QStringList &args);
 
     QString m_currentProject;
 };

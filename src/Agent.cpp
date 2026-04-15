@@ -262,6 +262,18 @@ void Agent::onUserMessage(const QString &text)
             }
             if (result.prompt.isEmpty()) return;
 
+            if (result.prompt == "__CODEASSEMBLE__") {
+            if (m_taskTree.isEmpty()) {
+            emit appendTools(
+                               "Kein Plan geladen. Bitte zuerst /loadDB oder /plan ausführen.",
+                            "error");
+                        emit inputEnabled(true);
+                        return;
+                    }
+                    assembleProject();
+                    emit inputEnabled(true);
+                    return;
+            }
             emit appendChat(QString("<b>Du:</b> %1").arg(text.toHtmlEscaped()), "user");
             emit appendChat("<b>Assistent:</b> ", "assistant");
 
@@ -1521,10 +1533,20 @@ bool Agent::advanceExecute()
             .arg(node->title.toHtmlEscaped(),
                  TaskNode::levelName(node->level).toHtmlEscaped()),
         "system");
-    emit appendChat("<b>Assistent (Execute):</b> ", "assistant");
-    emit inputEnabled(false);
-    emit statusChanged(QString("Execute: %1...").arg(node->title));
+    emit appendTools("<b>Execute: alle Nodes abgearbeitet!</b>", "system");
+    emit executeFinished();
+    m_executeMemory.save();
 
+    // Automatisch assemblieren wenn Sandbox-Projekt konfiguriert
+    if (!AppConfig::instance().executeSandboxProject().isEmpty())
+         assembleProject();
+
+    m_mode = AgentMode::Chat;
+    emit modeChanged(m_mode);
+    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+    emit inputEnabled(true);
+    emit statusChanged("Execute abgeschlossen");
+    return false;
     startGeneration(LlamaWorker::SamplerProfile::Chat);
     return true;
 }
@@ -1653,6 +1675,98 @@ QString Agent::buildExecutePrompt(const TaskNode *node) const
 bool Agent::isExecuteToolCall(const QString &response) const
 {
     return response.contains("<tool_call>") && response.contains("</tool_call>");
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SNIPPET 3: Agent.cpp — assembleProject() Implementierung
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ─── assembleProject ─────────────────────────────────────────────────────────
+// Assembliert alle H2-Nodes zu Dateien auf Disk.
+//
+// Zielverzeichnis: ~/llamatools/[executeSandboxProject]/
+// Wenn executeSandboxProject leer → Fehler + Hinweis an User.
+//
+// Wird aufgerufen:
+//   1. Automatisch am Ende von advanceExecute() wenn alle Nodes Done
+//   2. Manuell via /codeAssemble
+void Agent::assembleProject()
+{
+    const AppConfig &cfg = AppConfig::instance();
+    QString project = cfg.executeSandboxProject().trimmed();
+
+    if (project.isEmpty()) {
+        emit appendTools(
+            "<b>Assembly fehlgeschlagen:</b> Kein Sandbox-Projekt konfiguriert.<br>"
+            "Bitte im Einstellungen-Dialog unter <b>⚙ Execute → Projekt</b> "
+            "ein Unterverzeichnis angeben (z.B. 'MeinProjekt').",
+            "error");
+        return;
+    }
+
+    // Zielverzeichnis aufbauen
+    QString targetDir = QDir::homePath() + "/llamatools/" + project;
+
+    emit appendTools(
+        QString("<b>Assembly gestartet:</b> Ziel: <code>%1</code>")
+            .arg(targetDir.toHtmlEscaped()),
+        "system");
+
+    bool onlyDone = cfg.assembleOnlyDone();
+
+    // Assembly ausführen
+    CodeAssembler::AssemblyResult result =
+        m_assembler.assemble(targetDir, m_taskTree, onlyDone);
+
+    // Ergebnis anzeigen
+    if (result.filesWritten > 0) {
+        QString html = QString("<b>Assembly abgeschlossen:</b> "
+                               "%1 Datei(en) geschrieben, "
+                               "%2 übersprungen<br>")
+                           .arg(result.filesWritten)
+                           .arg(result.filesSkipped);
+
+        // Liste der geschriebenen Dateien (max 10 anzeigen)
+        html += "<small>";
+        int shown = 0;
+        for (const QString &path : result.writtenPaths) {
+            if (shown >= 10) {
+                html += QString("... und %1 weitere<br>")
+                .arg(result.writtenPaths.size() - shown);
+                break;
+            }
+            // Nur Dateiname anzeigen, nicht den ganzen Pfad
+            html += QString("&nbsp;✓ <code>%1</code><br>")
+                        .arg(QFileInfo(path).fileName().toHtmlEscaped());
+            ++shown;
+        }
+        html += "</small>";
+
+        emit appendTools(html, "system");
+        emit appendChat(
+            QString("<b>[Assembly]</b> %1 Datei(en) in <code>%2</code> geschrieben.")
+                .arg(result.filesWritten)
+                .arg(targetDir.toHtmlEscaped()),
+            "system");
+    } else {
+        emit appendTools(
+            QString("<b>Assembly:</b> Keine Dateien geschrieben "
+                    "(%1 übersprungen).<br>"
+                    "<small>Haben alle Nodes einen result-Inhalt?</small>")
+                .arg(result.filesSkipped),
+            "system");
+    }
+
+    // Fehler anzeigen
+    for (const QString &err : result.errors) {
+        emit appendTools(
+            QString("<b>Assembly-Fehler:</b> %1").arg(err.toHtmlEscaped()),
+            "error");
+    }
+
+    emit statusChanged(result.success()
+                           ? "Assembly abgeschlossen"
+                           : "Assembly mit Fehlern");
 }
 
 // ─── handleExecuteCode ───────────────────────────────────────────────────────
