@@ -61,13 +61,6 @@ void MainWindow::setupUi()
     // toggleViewAction() liefert eine QAction die den Dock ein-/ausblendet.
     // Qt erstellt sie automatisch für jeden QDockWidget.
 
-    connect(m_graphView, &QDockWidget::visibilityChanged,
-            this, [this](bool visible) {
-                if (visible)
-                    m_graphView->refresh(m_agent->taskTree());
-            });
-
-
     // ─── chatView ──────────────────────────────────────────────────────────
     ui->chatView->document()->setDefaultStyleSheet(R"(
         body       { font-family: 'Noto Sans', sans-serif; font-size: 13px; }
@@ -124,7 +117,14 @@ void MainWindow::setupUi()
     // NodeGraphView — initial versteckt, togglebar über Ansicht-Menü
     m_graphView = new NodeGraphView(this);
     addDockWidget(Qt::RightDockWidgetArea, m_graphView);
-    m_graphView->hide();
+    //m_graphView->hide();
+
+    connect(m_graphView, &QDockWidget::visibilityChanged,
+            this, [this](bool visible) {
+                if (visible)
+                    m_graphView->refresh(m_agent->taskTree());
+            });
+
 
     // Im Ansicht-Menü eintragen
     viewMenu->addAction(m_graphView->toggleViewAction());

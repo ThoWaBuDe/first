@@ -194,6 +194,6 @@ private:
     bool    m_executeAutoMode         = true;
     QString m_executeSandboxProject   = "";
     bool    m_assembleOnlyDone        = true;
-    bool    m_debugExecute            = false;
-    QString m_debugLogDir             = "";
+    bool    m_debugExecute            = true;
+    QString m_debugLogDir             = "/home/thomas/llamatools/debug";
 };
