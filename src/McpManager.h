@@ -1,22 +1,27 @@
 #pragma once
+// ─── McpManager ───────────────────────────────────────────────────────────────
+// Verwaltet mehrere MCP-Server.
+//
+// NEU (Punkt S): Auto-Restart mit Exponential Backoff
+//   Wenn ein Server crasht → automatischer Neustart nach Wartezeit.
+//   Backoff-Stufen: 1s → 5s → 30s → aufgeben (3 Versuche).
+//
+//   Warum Backoff statt sofortiger Neustart?
+//   Wenn der Server wegen einer kaputten Datei oder fehlender Abhängigkeit
+//   crasht, würde ein sofortiger Neustart in einer Crash-Loop enden.
+//   Backoff gibt dem System Zeit sich zu stabilisieren — und dem User Zeit
+//   das Problem zu bemerken.
+//
+//   Analogie AVR: Watchdog-Timer mit Progressive Timeout —
+//   kurze Resets bei transienten Fehlern, langer Timeout bei hartem Fehler.
+
 #include <QObject>
 #include <QVector>
 #include <QHash>
+#include <QTimer>
 #include <functional>
 #include "McpClient.h"
 
-// ─── McpManager ───────────────────────────────────────────────────────────────
-// Verwaltet mehrere MCP-Server und präsentiert ihre Tools als einheitliche
-// Schnittstelle nach oben (zu MainWindow) und unten (zu den McpClients).
-//
-// Verantwortlichkeiten:
-//   1. Server starten und initialisieren
-//   2. Tool-Namen → richtiger Server mappen (Routing)
-//   3. Aggregierten System-Prompt aus allen Tool-Beschreibungen bauen
-//   4. callTool() an den zuständigen Server weiterleiten
-//
-// Pattern: Facade — versteckt die Komplexität mehrerer McpClients hinter
-//          einer einfachen Schnittstelle (containsTool / callTool).
 class McpManager : public QObject {
     Q_OBJECT
 
@@ -25,52 +30,70 @@ public:
 
     explicit McpManager(QObject *parent = nullptr);
 
-    // Server hinzufügen und starten.
-    // onAllReady wird aufgerufen wenn ALLE Server initialisiert sind.
-    void addServer(const QString &binary,
-                   const QStringList &args = {});
+    void addServer(const QString &binary, const QStringList &args = {});
 
+    // Alle Server starten. onAllReady wenn letzter fertig (oder fehlgeschlagen).
     void startAll(std::function<void(bool ok, QStringList errors)> onAllReady);
 
-    // Prüft ob ein Tool-Name bekannt ist (von einem der Server advertised)
     bool containsTool(const QString &name) const;
 
-    // Tool aufrufen — automatisches Routing zum richtigen Server
     void callTool(const QString &name,
                   const QJsonObject &arguments,
                   ToolCallback callback);
 
-    // System-Prompt mit allen Tool-Beschreibungen aller Server
     QString buildToolsSystemPrompt() const;
-
-    // Tool-Call Format Beschreibung (für den System-Prompt Kopf)
     static QString toolCallHeader();
 
-    // Debug: gibt Server + Tool-Namen strukturiert zurueck
     struct ServerToolInfo {
-        QString         serverName;
-        QStringList     toolNames;
+        QString     serverName;
+        QStringList toolNames;
     };
     QVector<ServerToolInfo> debugToolInfo() const;
 
 signals:
     void serverDied(const QString &serverName);
+    // NEU: Informiert UI über Restart-Versuche
+    void serverRestarting(const QString &serverName, int attemptNr, int delaySeconds);
+    void serverRestored(const QString &serverName);
+    void serverGaveUp(const QString &serverName);
+
+private slots:
+    // NEU: Wird von QTimer nach Backoff-Wartezeit aufgerufen
+    void onRestartTimer(int serverIdx);
 
 private:
+    // ── Backoff-Konfiguration ─────────────────────────────────────────────
+    // 3 Versuche: 1s, 5s, 30s — dann aufgeben
+    static constexpr int MAX_RESTART_ATTEMPTS = 3;
+    static const int BACKOFF_DELAYS_MS[MAX_RESTART_ATTEMPTS]; // {1000, 5000, 30000}
+
     struct ServerEntry {
-        QString    binary;
+        QString     binary;
         QStringList args;
-        McpClient *client = nullptr;
-        bool       ready  = false;
-        QString    error;
+        McpClient  *client       = nullptr;
+        bool        ready        = false;
+        QString     error;
+
+        // Restart-Zustand
+        int         restartCount = 0;   // bisherige Restart-Versuche
+        QTimer     *restartTimer = nullptr; // Backoff-Timer (owned by McpManager)
     };
 
     QVector<ServerEntry>    m_servers;
+    QHash<QString, int>     m_toolIndex; // Tool-Name → Server-Index
 
-    // Tool-Name → Index in m_servers (für schnelles Routing)
-    QHash<QString, int>     m_toolIndex;
+    // ── Server (neu) starten ──────────────────────────────────────────────
+    // Wird beim ersten Start UND bei Restarts aufgerufen.
+    // onReady: Callback wenn Start (erfolgreich oder fehlgeschlagen) abgeschlossen.
+    void startServer(int idx,
+                     std::function<void(bool ok, QString error)> onReady);
 
-    // Hilfsfunktion: JSON Schema → lesbarer System-Prompt Text
+    // Tool-Index für einen Server neu aufbauen (nach Restart)
+    void rebuildToolIndex(int idx);
+
+    // NEU: Restart mit Backoff einleiten
+    void scheduleRestart(int serverIdx);
+
     static QString schemaToPrompt(const QString &toolName,
                                   const QString &description,
                                   const QJsonObject &inputSchema);

@@ -33,8 +33,7 @@ void ConfigDialog::setupUi()
     tabs->addTab(createSamplerTab(),  "🎲 Sampler");
     tabs->addTab(createAgentTab(),    "🤖 Agent");
     tabs->addTab(createLoggingTab(),  "📝 Logging");
-    tabs->addTab(createTemplateTab(), "💬 Template & Prompt");
-    tabs->addTab(createExecuteTab(),  "⚙ Execute");   // NEU
+    tabs->addTab(createTemplateTab(), "💬 Template & Prompt");  // ← NEU
     mainLayout->addWidget(tabs);
 
     auto *buttons = new QDialogButtonBox(
@@ -64,8 +63,8 @@ QWidget *ConfigDialog::createModelTab()
     pathLayout->addWidget(browseBtn);
     layout->addWidget(pathGroup);
 
-    auto *ctxGroup = new QGroupBox("Kontext ⚠ (Neustart erforderlich)");
-    auto *ctxForm  = new QFormLayout(ctxGroup);
+    auto *ctxGroup  = new QGroupBox("Kontext ⚠ (Neustart erforderlich)");
+    auto *ctxForm   = new QFormLayout(ctxGroup);
     m_contextSize = makeSpinBox(2048, 256*1024, 128*1024);
     m_contextSize->setSingleStep(1024);
     m_contextSize->setSuffix(" Tokens");
@@ -74,7 +73,8 @@ QWidget *ConfigDialog::createModelTab()
     m_batchSize->setSuffix(" Tokens");
     ctxForm->addRow("Batch-Size:", m_batchSize);
     auto *ctxHint = new QLabel(
-        "<small style='color:#888'>128k Tokens ≈ ~96k Wörter. Mehr Kontext = mehr VRAM.</small>");
+        "<small style='color:#888'>128k Tokens ≈ ~96k Wörter. "
+        "Mehr Kontext = mehr VRAM.</small>");
     ctxHint->setWordWrap(true);
     ctxForm->addRow("", ctxHint);
     layout->addWidget(ctxGroup);
@@ -208,69 +208,106 @@ QWidget *ConfigDialog::createLoggingTab()
     m_tavilyApiKey = new QLineEdit;
     m_tavilyApiKey->setEchoMode(QLineEdit::Password);
     m_tavilyApiKey->setPlaceholderText("tvly-...");
-    wsLayout->addRow("API Key:", m_tavilyApiKey);
+    auto *showKey = new QCheckBox("Anzeigen");
+    connect(showKey, &QCheckBox::toggled, this, [this](bool show){
+        m_tavilyApiKey->setEchoMode(show ? QLineEdit::Normal : QLineEdit::Password);
+    });
+    auto *keyLayout = new QHBoxLayout;
+    keyLayout->addWidget(m_tavilyApiKey);
+    keyLayout->addWidget(showKey);
+    wsLayout->addRow("API Key:", keyLayout);
     layout->addWidget(wsGroup);
 
-    connect(m_chatLoggingEnabled, &QCheckBox::toggled,
-            this, [this]{ m_loggingChanged = true; });
-
     layout->addStretch();
+    connect(m_chatLoggingEnabled, &QCheckBox::toggled, this, [this]{ m_loggingChanged = true; });
     return w;
 }
 
 // ─── Template & Prompt Tab ───────────────────────────────────────────────────
+// Zwei Gruppen:
+//   1. Chat-Template: ComboBox mit Presets + Info-Label + Custom-Editor
+//   2. User System-Prompt: freier Text der dem MCP-Prompt vorangestellt wird
+//
+// Neustart-Hinweis für Template-Änderungen — der Prompt selbst ist
+// sofort wirksam nach /clear (onClearChat() ruft buildFullSystemPrompt() auf).
 QWidget *ConfigDialog::createTemplateTab()
 {
     auto *w      = new QWidget;
     auto *layout = new QVBoxLayout(w);
     layout->setSpacing(12);
 
-    // ── Chat-Template ─────────────────────────────────────────────────────
+    // ── Chat-Template Gruppe ──────────────────────────────────────────────
     auto *tmplGroup  = new QGroupBox("Chat-Template ⚠ (Neustart erforderlich)");
     auto *tmplLayout = new QVBoxLayout(tmplGroup);
 
-    m_detectedTemplateLabel = new QLabel("Erkanntes Template aus GGUF: (wird nach Modell-Laden angezeigt)");
-    m_detectedTemplateLabel->setStyleSheet("color: #1a73e8; font-size: 11px;");
+    // ComboBox: jeder Eintrag trägt den Preset-Enum-Wert als UserData (int).
+    // Das erlaubt robustes Lesen ohne Abhängigkeit von der Reihenfolge.
+    m_chatTemplateCombo = new QComboBox;
+    m_chatTemplateCombo->addItem(
+        ChatTemplate::presetName(ChatTemplate::Preset::Auto),
+        static_cast<int>(ChatTemplate::Preset::Auto));
+    m_chatTemplateCombo->addItem(
+        ChatTemplate::presetName(ChatTemplate::Preset::ChatML),
+        static_cast<int>(ChatTemplate::Preset::ChatML));
+    m_chatTemplateCombo->addItem(
+        ChatTemplate::presetName(ChatTemplate::Preset::Llama3),
+        static_cast<int>(ChatTemplate::Preset::Llama3));
+    m_chatTemplateCombo->addItem(
+        ChatTemplate::presetName(ChatTemplate::Preset::Gemma),
+        static_cast<int>(ChatTemplate::Preset::Gemma));
+    m_chatTemplateCombo->addItem(
+        ChatTemplate::presetName(ChatTemplate::Preset::Mistral),
+        static_cast<int>(ChatTemplate::Preset::Mistral));
+    m_chatTemplateCombo->addItem(
+        ChatTemplate::presetName(ChatTemplate::Preset::Custom),
+        static_cast<int>(ChatTemplate::Preset::Custom));
+    tmplLayout->addWidget(m_chatTemplateCombo);
+
+    // Info-Label: zeigt was aus dem GGUF erkannt wurde
+    m_detectedTemplateLabel = new QLabel("Erkanntes Template: (Modell noch nicht geladen)");
+    m_detectedTemplateLabel->setStyleSheet("color: #555; font-size: 11px; font-style: italic;");
     m_detectedTemplateLabel->setWordWrap(true);
     tmplLayout->addWidget(m_detectedTemplateLabel);
 
-    auto *presetLayout = new QHBoxLayout;
-    presetLayout->addWidget(new QLabel("Preset:"));
-    m_chatTemplateCombo = new QComboBox;
-    m_chatTemplateCombo->addItem("Auto (aus Modell)",   static_cast<int>(ChatTemplate::Preset::Auto));
-    m_chatTemplateCombo->addItem("ChatML (Qwen, standard)", static_cast<int>(ChatTemplate::Preset::ChatML));
-    m_chatTemplateCombo->addItem("Llama 3",             static_cast<int>(ChatTemplate::Preset::Llama3));
-    m_chatTemplateCombo->addItem("Gemma",               static_cast<int>(ChatTemplate::Preset::Gemma));
-    m_chatTemplateCombo->addItem("Mistral",             static_cast<int>(ChatTemplate::Preset::Mistral));
-    m_chatTemplateCombo->addItem("Custom (manuell)",    static_cast<int>(ChatTemplate::Preset::Custom));
-    presetLayout->addWidget(m_chatTemplateCombo);
-    presetLayout->addStretch();
-    tmplLayout->addLayout(presetLayout);
-
-    m_customTemplateLabel = new QLabel("Custom Template (Jinja2-Format):");
-    m_customTemplateLabel->hide();
+    // Custom-Editor: nur sichtbar wenn "Custom" gewählt
+    // Format: JSON-Objekt mit den Format-Strings
+    m_customTemplateLabel = new QLabel("Custom Template (JSON):");
+    m_customTemplateEdit  = new QTextEdit;
+    m_customTemplateEdit->setMaximumHeight(110);
+    m_customTemplateEdit->setAcceptRichText(false);
+    m_customTemplateEdit->setFontFamily("monospace");
+    m_customTemplateEdit->setPlaceholderText(
+        "{\n"
+        "  \"systemStart\": \"<|im_start|>system\\n\",\n"
+        "  \"systemEnd\":   \"<|im_end|>\\n\",\n"
+        "  \"userStart\":   \"<|im_start|>user\\n\",\n"
+        "  \"userEnd\":     \"<|im_end|>\\n\",\n"
+        "  \"assistantStart\": \"<|im_start|>assistant\\n\",\n"
+        "  \"assistantEnd\":   \"\",\n"
+        "  \"toolRole\":       \"user\"\n"
+        "}");
+    m_customTemplateLabel->setVisible(false);
+    m_customTemplateEdit->setVisible(false);
     tmplLayout->addWidget(m_customTemplateLabel);
-
-    m_customTemplateEdit = new QTextEdit;
-    m_customTemplateEdit->setMaximumHeight(80);
-    m_customTemplateEdit->setFont(QFont("monospace", 10));
-    m_customTemplateEdit->hide();
     tmplLayout->addWidget(m_customTemplateEdit);
 
+    // Sichtbarkeit des Custom-Editors steuern + Neustart-Flag setzen
     connect(m_chatTemplateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
-                bool isCustom = (m_chatTemplateCombo->currentData().toInt() ==
-                                 static_cast<int>(ChatTemplate::Preset::Custom));
-                m_customTemplateLabel->setVisible(isCustom);
-                m_customTemplateEdit->setVisible(isCustom);
-                m_restartNeeded = true;
-                m_restartHint->show();
-            });
+        auto preset = static_cast<ChatTemplate::Preset>(
+            m_chatTemplateCombo->currentData().toInt());
+        bool isCustom = (preset == ChatTemplate::Preset::Custom);
+        m_customTemplateLabel->setVisible(isCustom);
+        m_customTemplateEdit->setVisible(isCustom);
+        m_restartNeeded = true;
+        m_restartHint->show();
+    });
 
     layout->addWidget(tmplGroup);
 
-    // ── User System-Prompt ────────────────────────────────────────────────
-    auto *promptGroup  = new QGroupBox("User System-Prompt (sofort wirksam nach /clear)");
+    // ── User System-Prompt Gruppe ──────────────────────────────────────────
+    // Sofort wirksam nach /clear — kein Neustart nötig.
+    auto *promptGroup  = new QGroupBox("User System-Prompt  (wirksam nach /clear)");
     auto *promptLayout = new QVBoxLayout(promptGroup);
 
     m_userSystemPrompt = new QTextEdit;
@@ -284,6 +321,7 @@ QWidget *ConfigDialog::createTemplateTab()
         "Leer lassen für Standard-Verhalten.");
     promptLayout->addWidget(m_userSystemPrompt);
 
+    // Erklärung wie der System-Prompt zusammengebaut wird
     auto *promptHint = new QLabel(
         "<small style='color:#888'>"
         "Der vollständige System-Prompt besteht aus:<br>"
@@ -297,122 +335,6 @@ QWidget *ConfigDialog::createTemplateTab()
     layout->addWidget(promptGroup);
     layout->addStretch();
 
-    return w;
-}
-
-// ─── Execute Tab ─────────────────────────────────────────────────────────────
-// Parameter für den Execute-Modus.
-//
-// executeMemoryMaxEntries: Wie viele Thoughts maximal gespeichert werden.
-//   Zu viel → Modell wird mit veraltetem Wissen überlastet
-//   Zu wenig → wichtige Erkenntnisse gehen verloren
-//   Default 50 (~2000 Token) ist ein guter Startpunkt für Qwen3.5-9B.
-//
-// executeAutoMode: Ob das Modell selbst entscheidet wann ein Node fertig ist.
-//   true  → Modell schreibt <code>...</code> wenn es fertig ist
-//   false → nicht implementiert, Platzhalter für manuelle Granularität
-//
-// executeSandboxProject: Welches Unterverzeichnis in ~/llamatools/ als
-//   Ziel für das Assembly verwendet wird.
-QWidget *ConfigDialog::createExecuteTab()
-{
-    auto *w      = new QWidget;
-    auto *layout = new QVBoxLayout(w);
-    layout->setSpacing(12);
-
-    // ── Thoughts (Kurzzeitgedächtnis) ─────────────────────────────────────
-    auto *memGroup = new QGroupBox("Thoughts — Kurzzeitgedächtnis");
-    auto *memForm  = new QFormLayout(memGroup);
-
-    m_executeMemoryMaxEntries = makeSpinBox(10, 200, 50);
-    m_executeMemoryMaxEntries->setSuffix(" Einträge");
-    m_executeMemoryMaxEntries->setToolTip(
-        "Maximale Anzahl Thoughts die nach jedem Node gespeichert werden.\n"
-        "Jeder Eintrag ≈ ~40 Token → 50 Einträge ≈ ~2000 Token.\n"
-        "Mehr Einträge = mehr Kontext, aber mehr Token-Verbrauch pro Generierung.");
-    memForm->addRow("Max. Thoughts:", m_executeMemoryMaxEntries);
-
-    auto *memHint = new QLabel(
-        "<small style='color:#888'>"
-        "Thoughts sind kurze Erkenntnisse die das Modell aus jedem Node gewinnt.<br>"
-        "Sie werden nach jedem Node automatisch komprimiert.<br>"
-        "50 Einträge ≈ 2000 Token — passt gut für Qwen3.5-9B mit 128k Kontext."
-        "</small>");
-    memHint->setWordWrap(true);
-    memForm->addRow("", memHint);
-    layout->addWidget(memGroup);
-
-    // ── Ausführungs-Modus ─────────────────────────────────────────────────
-    auto *modeGroup = new QGroupBox("Ausführungs-Modus");
-    auto *modeLayout = new QVBoxLayout(modeGroup);
-
-    m_executeAutoMode = new QCheckBox(
-        "Auto-Modus: Modell entscheidet wann ein Node abgeschlossen ist");
-    m_executeAutoMode->setToolTip(
-        "Auto: Modell schreibt <code>...</code> wenn es fertig ist.\n"
-        "Der Agent wartet auf diese Tags und verarbeitet dann das Ergebnis.\n"
-        "Deaktiviert: zukünftige manuelle Granularität (noch nicht implementiert).");
-    modeLayout->addWidget(m_executeAutoMode);
-    m_assembleOnlyDone = new QCheckBox(
-            "Nur Done-Nodes assemblieren (empfohlen)");
-    m_assembleOnlyDone->setToolTip(
-            "Aktiviert: nur Nodes mit Status 'Done' werden zu Dateien.\n"
-            "Deaktiviert: alle Nodes mit nicht-leerem result werden assembliert\n"
-           "(auch laufende oder fehlgeschlagene Nodes).");
-    modeLayout->addWidget(m_assembleOnlyDone);
-
-    auto *modeHint = new QLabel(
-        "<small style='color:#888'>"
-        "Im Auto-Modus signalisiert das Modell das Ende der Implementierung "
-        "durch &lt;code&gt;...&lt;/code&gt; Tags. "
-        "Alles außerhalb der Tags wird als sideOutput gespeichert."
-        "</small>");
-    modeHint->setWordWrap(true);
-    modeLayout->addWidget(modeHint);
-    layout->addWidget(modeGroup);
-
-    // ── Sandbox-Projekt ───────────────────────────────────────────────────
-    auto *projGroup  = new QGroupBox("Sandbox-Projekt (für Assembly)");
-    auto *projForm   = new QFormLayout(projGroup);
-
-    m_executeSandboxProject = new QLineEdit;
-    m_executeSandboxProject->setPlaceholderText(
-        "Unterverzeichnis in ~/llamatools/ (z.B. MeinProjekt)");
-    m_executeSandboxProject->setToolTip(
-        "Das Unterverzeichnis in ~/llamatools/ in das die assemblierten Dateien "
-        "geschrieben werden.\n"
-        "Leer = kein Projekt ausgewählt (Assembly deaktiviert).");
-    projForm->addRow("Projekt:", m_executeSandboxProject);
-
-    auto *projHint = new QLabel(
-        "<small style='color:#888'>"
-        "Assembly: Nodes werden nach Abschluss zu echten Dateien zusammengebaut.<br>"
-        "H2-Node 'GameState.cpp' → ~/llamatools/[Projekt]/GameState.cpp<br>"
-        "H2-result + H3-Kinder (sortiert nach order) werden konkateniert."
-        "</small>");
-    projHint->setWordWrap(true);
-    projForm->addRow("", projHint);
-    layout->addWidget(projGroup);
-
-    // ── DB-Pfad (info only) ───────────────────────────────────────────────
-    auto *dbGroup = new QGroupBox("Datenbank");
-    auto *dbForm  = new QFormLayout(dbGroup);
-    auto *dbLabel = new QLabel(
-        QString("<small style='color:#555'>%1</small>")
-        .arg(AppConfig::instance().taskDbPath()));
-    dbLabel->setWordWrap(true);
-    dbForm->addRow("DB-Pfad:", dbLabel);
-
-    auto *dbHint = new QLabel(
-        "<small style='color:#888'>"
-        "Enthält: tasks (Aufgabenbaum) + execute_memory (Thoughts).<br>"
-        "Änderbar in ~/.config/LlamaQt/LlamaQt.conf unter [TaskTree] db_path."
-        "</small>");
-    dbHint->setWordWrap(true);
-    dbForm->addRow("", dbHint);
-    layout->addWidget(dbGroup);
-
-    layout->addStretch();
     return w;
 }
 
@@ -446,7 +368,8 @@ void ConfigDialog::loadFromConfig()
     m_chatLogDir->setText(cfg.chatLogDir());
     m_tavilyApiKey->setText(cfg.tavilyApiKey());
 
-    // Template & Prompt
+    // ── Template & Prompt Tab ─────────────────────────────────────────────
+    // ComboBox auf gespeichertes Preset setzen
     int savedPreset = static_cast<int>(cfg.chatTemplatePreset());
     for (int i = 0; i < m_chatTemplateCombo->count(); ++i) {
         if (m_chatTemplateCombo->itemData(i).toInt() == savedPreset) {
@@ -454,8 +377,11 @@ void ConfigDialog::loadFromConfig()
             break;
         }
     }
+
+    // Custom-Template
     m_customTemplateEdit->setPlainText(cfg.customChatTemplate());
 
+    // Erkanntes GGUF-Template anzeigen
     QString detected = cfg.detectedJinjaTemplate();
     if (detected.isEmpty()) {
         m_detectedTemplateLabel->setText(
@@ -466,14 +392,9 @@ void ConfigDialog::loadFromConfig()
             QString("Erkanntes Template aus GGUF: %1")
             .arg(ChatTemplate::presetName(p)));
     }
+
+    // User System-Prompt
     m_userSystemPrompt->setPlainText(cfg.userSystemPrompt());
-
-    // Execute Tab
-    m_executeMemoryMaxEntries->setValue(cfg.executeMemoryMaxEntries());
-    m_executeAutoMode->setChecked(cfg.executeAutoMode());
-    m_executeSandboxProject->setText(cfg.executeSandboxProject());
-
-    m_assembleOnlyDone->setChecked(cfg.assembleOnlyDone());
 
     // Flags zurücksetzen
     m_samplersChanged = false;
@@ -519,19 +440,12 @@ void ConfigDialog::saveToConfig()
     cfg.setChatLogDir(m_chatLogDir->text());
     cfg.setTavilyApiKey(m_tavilyApiKey->text());
 
-    // Template & Prompt
+    // ── Template & Prompt Tab ─────────────────────────────────────────────
     auto preset = static_cast<ChatTemplate::Preset>(
         m_chatTemplateCombo->currentData().toInt());
     cfg.setChatTemplatePreset(preset);
     cfg.setCustomChatTemplate(m_customTemplateEdit->toPlainText());
     cfg.setUserSystemPrompt(m_userSystemPrompt->toPlainText());
-
-    // Execute
-    cfg.setExecuteMemoryMaxEntries(m_executeMemoryMaxEntries->value());
-    cfg.setExecuteAutoMode(m_executeAutoMode->isChecked());
-    cfg.setExecuteSandboxProject(m_executeSandboxProject->text());
-
-    cfg.setAssembleOnlyDone(m_assembleOnlyDone->isChecked());
 
     cfg.save();
 }

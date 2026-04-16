@@ -10,7 +10,8 @@ AppConfig &AppConfig::instance()
 
 AppConfig::AppConfig(QObject *parent)
     : QObject(parent)
-    , m_settings(QSettings::IniFormat, QSettings::UserScope, "LlamaQt", "LlamaQt")
+    , m_settings(QSettings::IniFormat, QSettings::UserScope,
+                 "LlamaQt", "LlamaQt")
 {
     load();
 }
@@ -22,7 +23,8 @@ void AppConfig::load()
     m_contextSize        = m_settings.value("context_size", m_contextSize).toInt();
     m_batchSize          = m_settings.value("batch_size",   m_batchSize).toInt();
     m_chatTemplatePreset = static_cast<ChatTemplate::Preset>(
-        m_settings.value("chat_template_preset", static_cast<int>(ChatTemplate::Preset::Auto)).toInt());
+        m_settings.value("chat_template_preset",
+                         static_cast<int>(ChatTemplate::Preset::Auto)).toInt());
     m_customChatTemplate = m_settings.value("custom_chat_template", "").toString();
     m_settings.endGroup();
 
@@ -38,6 +40,16 @@ void AppConfig::load()
     m_toolTemp = m_settings.value("temp",  m_toolTemp).toFloat();
     m_toolTopP = m_settings.value("top_p", m_toolTopP).toFloat();
     m_toolMinP = m_settings.value("min_p", m_toolMinP).toFloat();
+    m_settings.endGroup();
+
+    // ── NEU: SamplerExecute (Punkt I) ─────────────────────────────────────
+    // Eigene Gruppe damit ältere Configs ohne diese Gruppe sauber auf
+    // die Defaults fallen (m_executeTopK etc. sind bereits initialisiert).
+    m_settings.beginGroup("SamplerExecute");
+    m_executeTopK = m_settings.value("top_k", m_executeTopK).toInt();
+    m_executeTemp = m_settings.value("temp",  m_executeTemp).toFloat();
+    m_executeTopP = m_settings.value("top_p", m_executeTopP).toFloat();
+    m_executeMinP = m_settings.value("min_p", m_executeMinP).toFloat();
     m_settings.endGroup();
 
     m_settings.beginGroup("Agent");
@@ -65,23 +77,30 @@ void AppConfig::load()
     m_settings.beginGroup("ProjectIndex");
     m_indexSourceRoot  = "";
     m_indexSandboxRoot = m_settings.value("sandbox_root", home + "/llamatools").toString();
-    m_indexCachePath   = m_settings.value("cache_path",   home + "/.cache/llamaqt/index.md").toString();
+    m_indexCachePath   = m_settings.value("cache_path",
+                         home + "/.cache/llamaqt/index.md").toString();
     m_indexAutoRebuild = m_settings.value("auto_rebuild", true).toBool();
     m_settings.endGroup();
 
     m_settings.beginGroup("TaskTree");
-    m_taskDbPath = m_settings.value("db_path", home + "/llamatools/tasks.sqlite").toString();
+    m_taskDbPath = m_settings.value("db_path",
+                   home + "/llamatools/tasks.sqlite").toString();
     m_settings.endGroup();
 
     m_settings.beginGroup("Execute");
-    m_executeMemoryMaxEntries = m_settings.value("memory_max_entries", m_executeMemoryMaxEntries).toInt();
-    m_executeAutoMode         = m_settings.value("auto_mode",          m_executeAutoMode).toBool();
-    m_executeSandboxProject   = m_settings.value("sandbox_project",    m_executeSandboxProject).toString();
+    m_executeMemoryMaxEntries = m_settings.value("memory_max_entries",
+                                m_executeMemoryMaxEntries).toInt();
+    m_executeAutoMode         = m_settings.value("auto_mode",
+                                m_executeAutoMode).toBool();
+    m_executeSandboxProject   = m_settings.value("sandbox_project",
+                                m_executeSandboxProject).toString();
+    m_assembleOnlyDone        = m_settings.value("assemble_only_done",
+                                m_assembleOnlyDone).toBool();
+    m_debugExecute            = m_settings.value("debug_execute",
+                                m_debugExecute).toBool();
+    m_debugLogDir             = m_settings.value("debug_log_dir",
+                                m_debugLogDir).toString();
     m_settings.endGroup();
-
-    m_assembleOnlyDone = m_settings.value("assemble_only_done",
-                         m_assembleOnlyDone).toBool();
-
 }
 
 void AppConfig::save()
@@ -102,6 +121,12 @@ void AppConfig::save()
     m_settings.beginGroup("SamplerTool");
     m_settings.setValue("top_k", m_toolTopK); m_settings.setValue("temp",  m_toolTemp);
     m_settings.setValue("top_p", m_toolTopP); m_settings.setValue("min_p", m_toolMinP);
+    m_settings.endGroup();
+
+    // ── NEU: SamplerExecute (Punkt I) ─────────────────────────────────────
+    m_settings.beginGroup("SamplerExecute");
+    m_settings.setValue("top_k", m_executeTopK); m_settings.setValue("temp",  m_executeTemp);
+    m_settings.setValue("top_p", m_executeTopP); m_settings.setValue("min_p", m_executeMinP);
     m_settings.endGroup();
 
     m_settings.beginGroup("Agent");
@@ -139,9 +164,10 @@ void AppConfig::save()
     m_settings.setValue("memory_max_entries", m_executeMemoryMaxEntries);
     m_settings.setValue("auto_mode",          m_executeAutoMode);
     m_settings.setValue("sandbox_project",    m_executeSandboxProject);
-    m_settings.endGroup();
-
     m_settings.setValue("assemble_only_done", m_assembleOnlyDone);
+    m_settings.setValue("debug_execute",      m_debugExecute);
+    m_settings.setValue("debug_log_dir",      m_debugLogDir);
+    m_settings.endGroup();
 
     m_settings.sync();
 }

@@ -1,12 +1,25 @@
 #pragma once
 // ─── TaskNode ─────────────────────────────────────────────────────────────────
-// Ein Knoten im hierarchischen Aufgabenbaum des Coding-Agenten.
+// Ein Knoten im hierarchischen Aufgabenbaum.
 //
-// Neu in v3:
-//   result      — NUR sauberer Code (aus <code>...</code> extrahiert)
-//   sideOutput  — Thinking-Blöcke, Warnungen, Erklärungen des Modells
-//   buildPrompt — der vollständige Prompt der ans Modell geschickt wurde
-//                 (Lichtkegel-Debugging: warum hat das Modell X ausgegeben?)
+// NEU (Punkt H): symbol-Feld
+//   Eindeutiger Bezeichner für das zu implementierende Symbol.
+//   Format: "ClassName::methodName()" oder "ClassName::memberName"
+//   Zweck:
+//     - Duplikat-Erkennung im Optimizer: dasselbe Symbol darf nur in
+//       EINEM Node implementiert werden
+//     - Grundlage für späteren Clang-AST-Abgleich (Punkt L)
+//     - Macht dependsOn semantisch: "ich brauche dieses Symbol"
+//
+//   Beispiele:
+//     "Timer::start()"         — Methode
+//     "GameState::m_board"     — Member
+//     "GameState"              — Klasse (H2-Node)
+//     ""                       — leer = kein eindeutiges Symbol (Datei-Kopf etc.)
+//
+// NEU (Punkt N): validationResult-Feld
+//   Ergebnis des H4-Validierungs-Nodes.
+//   Format: "ok" oder Fehlerbeschreibung.
 
 #include <QString>
 #include <QDateTime>
@@ -22,7 +35,7 @@ enum class TaskLevel : int {
     Files      = 1,
     Class      = 2,
     Impl       = 3,
-    Validation = 4,
+    Validation = 4,  // NEU (Punkt N): Validierungs-Node nach H3
 };
 
 enum class TaskScope : int {
@@ -53,19 +66,35 @@ struct TaskNode
     QString   title;
     QString   description;
 
-    // ── Execute-Output (getrennt) ─────────────────────────────────────────────
-    // result:      NUR sauberer Code (aus <code>...</code> extrahiert)
-    //              Leer = noch nicht implementiert
-    // sideOutput:  Alles andere: Thinking, Warnungen, Erklärungen
-    //              Nützlich um zu verstehen was das Modell "gedacht" hat
-    // buildPrompt: Der vollständige Prompt (Lichtkegel: vertikal + horizontal + Thoughts)
-    //              Für Debugging: man sieht genau welchen Kontext das Modell bekam
+    // ── Symbol (NEU — Punkt H) ────────────────────────────────────────────────
+    // Eindeutiger C++-Symbolname für diesen Node.
+    // Leer = kein spezifisches Symbol (z.B. Datei-Kopf, CMakeLists.txt).
     //
-    // Analogie AVR: wie drei separate Register — result ist der Ausgang,
-    // sideOutput ist der Debug-Port, buildPrompt ist der Trace-Buffer.
-    QString   result;
-    QString   sideOutput;
-    QString   buildPrompt;
+    // Konvention:
+    //   H2 (.h):    "ClassName"                    → Klassen-Interface
+    //   H2 (.cpp):  "ClassName"                    → Datei insgesamt
+    //   H3:         "ClassName::methodName()"      → einzelne Methode
+    //   H3 Member:  "ClassName::m_memberName"      → Member-Variable
+    //   H3 frei:    "functionName()"               → freie Funktion
+    //
+    // Warum kein vollständiges Typ-System?
+    //   Das 9B-Modell soll den Symbol-String selbst generieren.
+    //   Zu strenge Validierung würde Halluzinationen nicht verhindern
+    //   sondern nur die Fehlerbehandlung komplizieren.
+    //   Der String wird für Duplikat-Erkennung per Gleichheitsvergleich
+    //   genutzt — Groß-/Kleinschreibung wird beachtet.
+    QString   symbol;
+
+    // ── Execute-Output ────────────────────────────────────────────────────────
+    QString   result;       // NUR sauberer Code (aus <code>...</code>)
+    QString   sideOutput;   // Thinking, Warnungen, Erklärungen
+    QString   buildPrompt;  // vollständiger Prompt (Debugging)
+
+    // ── Validierung (NEU — Punkt N) ───────────────────────────────────────────
+    // Wird vom H4-Validierungs-Node befüllt.
+    // "ok"           → Implementierung ist korrekt
+    // "<Fehler>"     → Beschreibung des Problems (geht zurück an Optimizer)
+    QString   validationResult;
 
     // ── Horizontale Abhängigkeiten ────────────────────────────────────────────
     QList<qint64> dependsOn;
@@ -86,8 +115,7 @@ struct TaskNode
     {}
 
     ~TaskNode() {
-        for (TaskNode *child : children)
-            delete child;
+        for (TaskNode *child : children) delete child;
     }
 
     TaskNode(const TaskNode &) = delete;
@@ -120,6 +148,18 @@ struct TaskNode
     bool isLeaf() const { return children.empty(); }
     bool isRoot() const { return parent == nullptr; }
 
+    // Prüft ob dieser Node ein Validierungs-Node ist (H4)
+    bool isValidationNode() const {
+        return level == static_cast<int>(TaskLevel::Validation);
+    }
+
+    // Gibt den H3-Geschwister-Node zurück den dieser H4-Node validiert.
+    // Konvention: H4-Node ist das letzte Kind seines H3-Elters.
+    const TaskNode *validatedNode() const {
+        if (!isValidationNode() || !parent) return nullptr;
+        return parent;
+    }
+
     TaskLevel taskLevel() const { return static_cast<TaskLevel>(level); }
 
     std::vector<const TaskNode*> pathFromRoot() const {
@@ -133,9 +173,8 @@ struct TaskNode
     QString verticalContext() const {
         QString ctx;
         for (const TaskNode *n : pathFromRoot()) {
-            ctx += QString("%1%2: %3\n")
-                   .arg(levelName(n->level))
-                   .arg(n == this ? " (aktuell)" : "")
+            ctx += QString("%1: %2\n")
+                   .arg(TaskNode::levelName(n->level))
                    .arg(n->title);
         }
         if (!description.isEmpty())
@@ -144,8 +183,6 @@ struct TaskNode
     }
 
     // ── Dateityp-Erkennung ────────────────────────────────────────────────────
-    // Wird von buildExecuteSystemPrompt() genutzt um dem Modell zu sagen
-    // welche Sprache es ausgeben soll.
     enum class FileType { Cpp, CppHeader, CMake, Python, Text, Unknown };
 
     FileType fileType() const {
@@ -163,7 +200,6 @@ struct TaskNode
         return FileType::Unknown;
     }
 
-    // Beschreibung des Dateityps für den System-Prompt
     QString fileTypeDescription() const {
         switch (fileType()) {
             case FileType::Cpp:       return "C++ Implementierungsdatei (.cpp)";
@@ -176,7 +212,6 @@ struct TaskNode
         return "Quellcode-Datei";
     }
 
-    // Sprachname für den System-Prompt ("C++", "CMake", ...)
     QString languageName() const {
         switch (fileType()) {
             case FileType::Cpp:
@@ -230,21 +265,23 @@ struct TaskNode
         QJsonArray deps;
         for (qint64 d : dependsOn) deps.append(d);
         return QJsonObject{
-            {"id",            id},
-            {"parent_id",     parent ? parent->id : qint64(-1)},
-            {"level",         level},
-            {"scope",         scopeName(scope)},
-            {"order",         order},
-            {"insertion_idx", insertionIdx},
-            {"title",         title},
-            {"description",   description},
-            {"result",        result},
-            {"side_output",   sideOutput},
-            {"build_prompt",  buildPrompt},
-            {"depends_on",    deps},
-            {"status",        statusName(status)},
-            {"created_at",    createdAt.toString(Qt::ISODate)},
-            {"updated_at",    updatedAt.toString(Qt::ISODate)},
+            {"id",                id},
+            {"parent_id",         parent ? parent->id : qint64(-1)},
+            {"level",             level},
+            {"scope",             scopeName(scope)},
+            {"order",             order},
+            {"insertion_idx",     insertionIdx},
+            {"title",             title},
+            {"description",       description},
+            {"symbol",            symbol},           // NEU
+            {"result",            result},
+            {"side_output",       sideOutput},
+            {"build_prompt",      buildPrompt},
+            {"validation_result", validationResult}, // NEU
+            {"depends_on",        deps},
+            {"status",            statusName(status)},
+            {"created_at",        createdAt.toString(Qt::ISODate)},
+            {"updated_at",        updatedAt.toString(Qt::ISODate)},
         };
     }
 

@@ -14,12 +14,19 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Sql)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LLAMA REQUIRED IMPORTED_TARGET llama)
 
-
 # ─── Sources ────────────────────────────────────────────────────────────────
 set(SOURCES
     src/main.cpp
     src/MainWindow.cpp
+
+    # Agent — aufgeteilt in Teilklassen (Refactoring)
     src/Agent.cpp
+    src/AgentChat.cpp
+    src/AgentPlan.cpp
+    src/AgentExecute.cpp
+    src/AgentAssemble.cpp
+    src/AgentUtils.cpp
+
     src/CommandProcessor.cpp
     src/LlamaWorker.cpp
     src/McpClient.cpp
@@ -36,6 +43,11 @@ set(SOURCES
 set(HEADERS
     src/MainWindow.h
     src/Agent.h
+    src/AgentChat.h
+    src/AgentPlan.h
+    src/AgentExecute.h
+    src/AgentAssemble.h
+    src/AgentUtils.h
     src/CommandProcessor.h
     src/LlamaWorker.h
     src/McpClient.h
@@ -53,14 +65,13 @@ set(HEADERS
     src/ExecuteMemory.h
     src/CodeAssembler.h
     src/NodeGraphView.h
+    src/ChatTemplate.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}
     src/MainWindow.ui)
 
 # ─── Include-Pfade ──────────────────────────────────────────────────────────
-# Hinweis: PkgConfig::LLAMA bringt Include-Pfade und RPATH automatisch mit.
-# Wir fügen nur src/ manuell hinzu.
 target_include_directories(LlamaQt PRIVATE
     src/
     ${LLAMA_INCLUDE_DIRS}
