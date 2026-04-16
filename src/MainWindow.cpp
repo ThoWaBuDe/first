@@ -139,6 +139,28 @@ void MainWindow::setupUi()
                 // TODO: PlannerDock auf diesen Node scrollen
                 Q_UNUSED(nodeId)
             });
+
+    // ─── SearchBar ────────────────────────────────────────────────────────────
+    // Eine SearchBar Instanz für alle TextEdits.
+    // attachTo() wechselt den aktiven TextEdit.
+    m_searchBar = new SearchBar(ui->centralWidget);
+
+    // In das zentralWidget-Layout einbauen — ÜBER dem inputEdit.
+    // Layout ist QVBoxLayout (mainLayout in setupUi):
+    //   chatView → statusLabel → searchBar (NEU) → inputLayout
+    // Suche den Einfügepunkt: vor dem inputLayout.
+    auto *centralLayout = qobject_cast<QVBoxLayout*>(
+        ui->centralWidget->layout());
+    if (centralLayout) {
+        // Index des inputLayouts finden (letztes Item)
+        int insertIdx = centralLayout->count() - 1;
+        centralLayout->insertWidget(insertIdx, m_searchBar);
+    }
+
+    // Ctrl+F — kontextsensitiv je nach aktivem Widget
+    auto *findShortcut = new QShortcut(QKeySequence::Find, this);
+    connect(findShortcut, &QShortcut::activated,
+            this, &MainWindow::onSearchRequested);
 }
 
 // ─── eventFilter ─────────────────────────────────────────────────────────────
@@ -191,6 +213,9 @@ void MainWindow::setupConnections()
     // ─── EditorDock ───────────────────────────────────────────────────────
     connect(m_editorDock, &EditorDock::fileSavedByUser,
             m_agent,      &Agent::onFileSavedByUser);
+
+    connect(m_editorDock, &EditorDock::searchRequested,
+             this, &MainWindow::onSearchRequested);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -249,6 +274,27 @@ void MainWindow::onRefreshGraph()
         m_graphView->refresh(m_agent->taskTree());
 }
 
+void MainWindow::onSearchRequested()
+{
+    // Kontextsensitiv: wählt den aktiven TextEdit.
+    // Priorität: EditorDock > toolView > chatView
+    //
+    // Warum diese Reihenfolge?
+    //   EditorDock ist der primäre Code-Editor — dort sucht man am häufigsten.
+    //   toolView zeigt Tool-Ergebnisse — auch sinnvoll zu durchsuchen.
+    //   chatView ist der Chat — Fallback.
+
+    QPlainTextEdit *editor = m_editorDock->currentEditor();
+    if (m_editorDock->isVisible() && editor) {
+        m_searchBar->attachTo(editor);
+    } else if (m_editorDock->isVisible()) {
+        m_searchBar->attachTo(ui->toolView);
+    } else {
+        m_searchBar->attachTo(ui->chatView);
+    }
+    m_searchBar->openBar();
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // SLOTS: Agent → UI Darstellung
 // ═════════════════════════════════════════════════════════════════════════════
@@ -288,7 +334,13 @@ void MainWindow::onInputEnabled(bool enabled)
 {
     ui->inputEdit->setEnabled(enabled);
     ui->sendButton->setEnabled(enabled);
-    ui->stopButton->setEnabled(!enabled);
+
+    // Stop-Button: aktiv wenn generiert wird ODER im Execute/Plan-Modus
+    // (zwischen zwei Nodes ist m_generating kurz false, aber der Modus bleibt)
+    bool agentBusy = (m_agent->mode() == AgentMode::Execute ||
+                      m_agent->mode() == AgentMode::Plan);
+    ui->stopButton->setEnabled(!enabled || agentBusy);
+
     if (enabled)
         ui->inputEdit->setFocus();
 }

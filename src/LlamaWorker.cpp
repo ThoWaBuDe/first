@@ -324,6 +324,7 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
 
     // ── Token-Sampling-Loop ───────────────────────────────────────────────
     static const QString TOOL_STOP = "</tool_call>";
+    static const QString CODE_STOP = "</code>";
     QString fullResponse;
     const int maxNewTokens = 8192;
 
@@ -338,10 +339,17 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
         fullResponse += tokenStr;
         emit tokenGenerated(tokenStr);
 
-        // Tool-Calls früh stoppen (gilt für Tool UND Execute)
+        // Tool-Calls früh stoppen
         if ((profile == SamplerProfile::Tool ||
              profile == SamplerProfile::Execute) &&
             fullResponse.endsWith(TOOL_STOP))
+            break;
+
+        // FIX: Execute-Modus stoppt sobald </code> vollständig im Response.
+        // Das verhindert den Halluzinations-Loop nach dem Code-Block.
+        // Analogie AVR: UART-Empfang stoppt bei ETX-Byte, nicht erst bei Puffer-Ende.
+        if (profile == SamplerProfile::Execute &&
+            fullResponse.contains(CODE_STOP))
             break;
 
         llama_batch nextBatch = llama_batch_get_one(&newToken, 1);

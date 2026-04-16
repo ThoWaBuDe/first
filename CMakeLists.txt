@@ -66,6 +66,7 @@ set(HEADERS
     src/CodeAssembler.h
     src/NodeGraphView.h
     src/ChatTemplate.h
+    src/SearchBar.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}

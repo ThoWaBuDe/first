@@ -7,6 +7,8 @@
 #include "EditorDock.h"
 #include "PlannerDock.h"
 #include "NodeGraphView.h"
+#include "SearchBar.h"
+
 
 namespace Ui { class MainWindow; }
 
@@ -44,6 +46,7 @@ private slots:
 
     void onRefreshGraph();
 
+    void onSearchRequested();
 
 private:
     void setupUi();
@@ -57,6 +60,7 @@ private:
     EditorDock     *m_editorDock;
     PlannerDock    *m_plannerDock;   // NEU
     NodeGraphView *m_graphView = nullptr;
+    SearchBar *m_searchBar = nullptr;
 
     static constexpr int AUTOSCROLL_THRESHOLD = 20;
 };

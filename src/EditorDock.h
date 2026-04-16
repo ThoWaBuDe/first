@@ -139,6 +139,10 @@ class EditorDock : public QDockWidget {
 
 public:
     explicit EditorDock(QWidget *parent = nullptr);
+    QPlainTextEdit *currentEditor() const {
+        EditorTab *tab = currentEditorTab();
+        return tab ? tab->editor() : nullptr;
+    }
 
     // Öffnet eine Datei in einem neuen Tab.
     // Wenn die Datei bereits offen ist, wird zum Tab gewechselt (kein Duplikat).
@@ -148,6 +152,7 @@ signals:
     // Emittiert nach manuellem Speichern durch den User (Ctrl+S oder Button).
     // → MainWindow leitet weiter an Agent → sichtbare Systemnachricht im chatView.
     void fileSavedByUser(const QString &filePath);
+    void searchRequested();
 
 private slots:
     void onOpenClicked();

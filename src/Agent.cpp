@@ -314,16 +314,30 @@ void Agent::onUserMessage(const QString &text)
 
 void Agent::onStop()
 {
-    ++m_sessionId;
-    m_generating = false;
+    ++m_sessionId;           // ungültig macht alle laufenden Callbacks
+    m_generating        = false;
+    m_updatingThoughts  = false;  // FIX: Thoughts-Update abbrechen
+    m_continuationCount = 0;
+
     if (m_worker) m_worker->stopGeneration();
     m_toolFailCount.clear();
 
-    if (m_mode == AgentMode::Plan) {
-        m_mode = AgentMode::Chat;
-        emit modeChanged(m_mode);
-        m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+    // FIX: Execute-Zustand sauber bereinigen
+    if (m_mode == AgentMode::Execute || m_mode == AgentMode::Plan) {
+        // Aktuellen Node als Interrupted markieren (falls vorhanden)
+        if (m_currentNode &&
+            m_currentNode->status == TaskStatus::Running) {
+            m_taskTree.setStatus(m_currentNode, TaskStatus::Pending); // zurück auf Pending
+            m_taskTree.save();
+            emit taskTreeUpdated();
+        }
+        m_currentNode = nullptr;
     }
+
+    m_mode = AgentMode::Chat;
+    emit modeChanged(m_mode);
+    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+
     emit inputEnabled(true);
     emit statusChanged("Gestoppt");
 }
@@ -331,8 +345,18 @@ void Agent::onStop()
 void Agent::onClearChat()
 {
     ++m_sessionId;
-    m_generating = false;
+    m_generating        = false;
+    m_updatingThoughts  = false;  // FIX: Thoughts-Update abbrechen
+
     if (m_worker) m_worker->stopGeneration();
+
+    // FIX: Execute-Zustand sauber bereinigen
+    if (m_currentNode &&
+        m_currentNode->status == TaskStatus::Running) {
+        m_taskTree.setStatus(m_currentNode, TaskStatus::Pending);
+        m_taskTree.save();
+    }
+    m_currentNode = nullptr;
 
     m_mode = AgentMode::Chat;
     emit modeChanged(m_mode);
@@ -348,11 +372,13 @@ void Agent::onClearChat()
     m_promptTokens      = 0;
     m_toolFailCount.clear();
     m_planRetryCount    = 0;
+    m_continuationCount = 0;
 
     emit appendChat("Chat gelöscht.", "system");
     m_chat->emitStats();
     emit inputEnabled(true);
     emit statusChanged("Bereit");
+    emit taskTreeUpdated();  // Graph aktualisieren (Nodes auf Pending)
 }
 
 void Agent::onFileSavedByUser(const QString &filePath)

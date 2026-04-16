@@ -275,6 +275,9 @@ EditorDock::EditorDock(QWidget *parent)
     auto *saveShortcut = new QShortcut(QKeySequence::Save, this);
     connect(saveShortcut, &QShortcut::activated, this, &EditorDock::onSaveClicked);
 
+    auto *findInEditorShortcut = new QShortcut(QKeySequence::Find, this);
+    connect(findInEditorShortcut, &QShortcut::activated,
+             this, &EditorDock::searchRequested);
     updateButtonStates();
 }
 
