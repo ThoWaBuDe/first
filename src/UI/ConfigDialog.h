@@ -10,8 +10,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QGroupBox>
-#include "ChatTemplate.h"
-#include "ToolCallFormat.h"
+#include "Chat/ChatTemplate.h"
+#include "Chat/ToolCallFormat.h"
 
 // ─── ConfigDialog ─────────────────────────────────────────────────────────────
 // Tabs:

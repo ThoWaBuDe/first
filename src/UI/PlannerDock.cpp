@@ -1,6 +1,6 @@
-#include "PlannerDock.h"
-#include "TaskNodeDialog.h"
-#include "AppConfig.h"
+#include "UI/PlannerDock.h"
+#include "UI/TaskNodeDialog.h"
+#include "Config/AppConfig.h"
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>

@@ -6,9 +6,9 @@
 #include <QLabel>
 #include <QSplitter>
 #include <QSet>
-#include "TaskTree.h"
-#include "TaskTreeModel.h"
-#include "Agent.h"
+#include "Task/TaskTree.h"
+#include "Task/TaskTreeModel.h"
+#include "Agent/Agent.h"
 
 // ─── PlannerDock ──────────────────────────────────────────────────────────────
 // QDockWidget das den TaskTree als QTreeView anzeigt.

@@ -2,8 +2,8 @@
 #include <QObject>
 #include <QString>
 #include <QSettings>
-#include "ChatTemplate.h"
-#include "ToolCallFormat.h"
+#include "Chat/ChatTemplate.h"
+#include "Chat/ToolCallFormat.h"
 
 // ─── AppConfig ────────────────────────────────────────────────────────────────
 // Singleton — hält alle persistenten Einstellungen.

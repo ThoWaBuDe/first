@@ -1,11 +1,12 @@
-#include "AgentExecute.h"
-#include "Agent.h"
-#include "AgentUtils.h"
-#include "AppConfig.h"
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
 #include <QDir>
+
+#include "Agent/AgentExecute.h"
+#include "Agent/Agent.h"
+#include "Agent/AgentUtils.h"
+#include "Config/AppConfig.h"
 
 void AgentExecute::startExecute()
 {

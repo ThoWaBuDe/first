@@ -4,8 +4,8 @@
 #include <QHash>
 #include <QTimer>
 #include <functional>
-#include "McpClient.h"
-#include "ToolCallFormat.h"
+#include "MCP/McpClient.h"
+#include "Chat/ToolCallFormat.h"
 
 // ─── McpManager ───────────────────────────────────────────────────────────────
 // NEU: buildToolsSystemPrompt() und toolCallHeader() bekommen

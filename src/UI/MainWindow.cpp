@@ -1,6 +1,6 @@
 #include "MainWindow.h"
 #include "ui_MainWindow.h"
-#include "AppConfig.h"
+#include "Config/AppConfig.h"
 #include <QScrollBar>
 #include <QTextCursor>
 #include <QKeyEvent>

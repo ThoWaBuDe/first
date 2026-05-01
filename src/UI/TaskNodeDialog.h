@@ -25,7 +25,7 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QLabel>
-#include "TaskTree.h"
+#include "Task/TaskTree.h"
 
 class TaskNodeDialog : public QDialog {
     Q_OBJECT

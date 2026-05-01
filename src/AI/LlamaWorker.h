@@ -3,9 +3,9 @@
 #include <QString>
 #include <QVector>
 #include <atomic>
-#include "ChatModel.h"
-#include "ChatTemplate.h"
-#include "ToolCallFormat.h"
+#include "Chat/ChatModel.h"
+#include "Chat/ChatTemplate.h"
+#include "Chat/ToolCallFormat.h"
 
 // ─── LlamaWorker ──────────────────────────────────────────────────────────────
 // Active Object im Worker-Thread.

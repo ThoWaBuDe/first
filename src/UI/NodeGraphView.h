@@ -12,7 +12,7 @@
 // NodeItem kennt keine Edges — das war nur für Kinematik nötig
 // die noch nicht implementiert ist.
 
-#include "TaskTree.h"
+#include "Task/TaskTree.h"
 #include <QDockWidget>
 #include <QGraphicsView>
 #include <QGraphicsScene>

@@ -1,9 +1,10 @@
+#include <QJsonDocument>
+#include <QJsonObject>
+
 #include "AgentChat.h"
 #include "Agent.h"
 #include "AgentUtils.h"
-#include "AppConfig.h"
-#include <QJsonDocument>
-#include <QJsonObject>
+#include "Config/AppConfig.h"
 
 // ─── handleToolCall ───────────────────────────────────────────────────────────
 // NEU: format-agnostisch via ToolCallParser.
@@ -399,11 +400,11 @@ void AgentChat::handleImport(const QString &path)
     m_agent.m_chatModel.setSystemPrompt(importSystemPrompt);
     m_agent.m_chatModel.addUserMessage(
         QString("Importiere den Code unter '%1'.\n\n"
-                "Beginne mit der Erkundung der Verzeichnisstruktur.\n"
-                "Dann list_symbols pro Datei.\n"
-                "Dann get_function_body für jede Methode → result-Feld befüllen.\n"
-                "H3-Nodes müssen den echten Code enthalten — das ist der Kern des Imports.")
-        .arg(path));
+                "STARTE SOFORT mit diesem Tool-Call — keine Erklärung vorher:\n"
+                "<tool_call>\n"
+                "{\"name\": \"list_dir\", \"arguments\": {\"path\": \"%1\"}}\n"
+                "</tool_call>")
+            .arg(path));
 
     m_agent.m_currentResponse.clear();
     m_agent.m_thinkBuffer.clear();

@@ -1,6 +1,3 @@
-#include "ConfigDialog.h"
-#include "AppConfig.h"
-
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFormLayout>
@@ -12,17 +9,20 @@
 #include <QLabel>
 #include <QFrame>
 
+#include "UI/ConfigDialog.h"
+#include "Config/AppConfig.h"
+
+
 ConfigDialog::ConfigDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("LlamaQt — Einstellungen");
-    setMinimumWidth(520);
+    setMinimumWidth(560);
     setModal(true);
     setupUi();
     loadFromConfig();
 }
 
-// ─── setupUi ─────────────────────────────────────────────────────────────────
 void ConfigDialog::setupUi()
 {
     auto *mainLayout = new QVBoxLayout(this);
@@ -33,7 +33,7 @@ void ConfigDialog::setupUi()
     tabs->addTab(createSamplerTab(),  "🎲 Sampler");
     tabs->addTab(createAgentTab(),    "🤖 Agent");
     tabs->addTab(createLoggingTab(),  "📝 Logging");
-    tabs->addTab(createTemplateTab(), "💬 Template & Prompt");  // ← NEU
+    tabs->addTab(createTemplateTab(), "💬 Template & Format");
     mainLayout->addWidget(tabs);
 
     auto *buttons = new QDialogButtonBox(
@@ -46,7 +46,6 @@ void ConfigDialog::setupUi()
     mainLayout->addWidget(buttons);
 }
 
-// ─── Modell Tab ──────────────────────────────────────────────────────────────
 QWidget *ConfigDialog::createModelTab()
 {
     auto *w      = new QWidget;
@@ -72,11 +71,6 @@ QWidget *ConfigDialog::createModelTab()
     m_batchSize = makeSpinBox(64, 4096, 512);
     m_batchSize->setSuffix(" Tokens");
     ctxForm->addRow("Batch-Size:", m_batchSize);
-    auto *ctxHint = new QLabel(
-        "<small style='color:#888'>128k Tokens ≈ ~96k Wörter. "
-        "Mehr Kontext = mehr VRAM.</small>");
-    ctxHint->setWordWrap(true);
-    ctxForm->addRow("", ctxHint);
     layout->addWidget(ctxGroup);
 
     m_restartHint = new QLabel(
@@ -97,14 +91,17 @@ QWidget *ConfigDialog::createModelTab()
     return w;
 }
 
-// ─── Sampler Tab ─────────────────────────────────────────────────────────────
 QWidget *ConfigDialog::createSamplerTab()
 {
     auto *w      = new QWidget;
-    auto *layout = new QHBoxLayout(w);
-    layout->setSpacing(16);
+    auto *layout = new QVBoxLayout(w);
+    layout->setSpacing(12);
 
-    auto *chatGroup = new QGroupBox("Chat-Profil  (Temp 0.7, kreativ)");
+    auto *hLayout = new QHBoxLayout;
+    hLayout->setSpacing(12);
+
+    // Chat
+    auto *chatGroup = new QGroupBox("Chat  (Temp 0.7 — kreativ)");
     auto *chatForm  = new QFormLayout(chatGroup);
     m_chatTopK = makeSpinBox(1, 200, 40);
     m_chatTemp = makeDoubleSpinBox(0.0, 2.0, 0.05, 2, 0.7);
@@ -114,9 +111,28 @@ QWidget *ConfigDialog::createSamplerTab()
     chatForm->addRow("Temp:",  m_chatTemp);
     chatForm->addRow("Top-P:", m_chatTopP);
     chatForm->addRow("Min-P:", m_chatMinP);
-    layout->addWidget(chatGroup);
+    hLayout->addWidget(chatGroup);
 
-    auto *toolGroup = new QGroupBox("Tool-Profil  (Temp 0.1, deterministisch)");
+    // Execute
+    auto *execGroup = new QGroupBox("Execute  (Temp 0.2 — Code)");
+    auto *execBox   = new QVBoxLayout(execGroup);
+    auto *execForm  = new QFormLayout;
+    m_executeTopK = makeSpinBox(1, 100, 20);
+    m_executeTemp = makeDoubleSpinBox(0.0, 1.0, 0.05, 2, 0.2);
+    m_executeTopP = makeDoubleSpinBox(0.0, 1.0, 0.05, 2, 0.6);
+    m_executeMinP = makeDoubleSpinBox(0.0, 1.0, 0.01, 2, 0.05);
+    execForm->addRow("Top-K:", m_executeTopK);
+    execForm->addRow("Temp:",  m_executeTemp);
+    execForm->addRow("Top-P:", m_executeTopP);
+    execForm->addRow("Min-P:", m_executeMinP);
+    execBox->addLayout(execForm);
+    auto *execHint = new QLabel(
+        "<small style='color:#888'>Für Code-Generierung im Execute-Modus.</small>");
+    execBox->addWidget(execHint);
+    hLayout->addWidget(execGroup);
+
+    // Tool
+    auto *toolGroup = new QGroupBox("Tool  (Temp 0.1 — JSON)");
     auto *toolForm  = new QFormLayout(toolGroup);
     m_toolTopK = makeSpinBox(1, 100, 20);
     m_toolTemp = makeDoubleSpinBox(0.0, 1.0, 0.05, 2, 0.1);
@@ -126,22 +142,22 @@ QWidget *ConfigDialog::createSamplerTab()
     toolForm->addRow("Temp:",  m_toolTemp);
     toolForm->addRow("Top-P:", m_toolTopP);
     toolForm->addRow("Min-P:", m_toolMinP);
-    layout->addWidget(toolGroup);
+    hLayout->addWidget(toolGroup);
+
+    layout->addLayout(hLayout);
 
     auto markSamplers = [this]{ m_samplersChanged = true; };
-    connect(m_chatTopK, QOverload<int>::of(&QSpinBox::valueChanged),          this, markSamplers);
-    connect(m_chatTemp, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, markSamplers);
-    connect(m_chatTopP, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, markSamplers);
-    connect(m_chatMinP, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, markSamplers);
-    connect(m_toolTopK, QOverload<int>::of(&QSpinBox::valueChanged),          this, markSamplers);
-    connect(m_toolTemp, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, markSamplers);
-    connect(m_toolTopP, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, markSamplers);
-    connect(m_toolMinP, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, markSamplers);
+    for (auto *sb : {m_chatTopK, m_executeTopK, m_toolTopK})
+        connect(sb, QOverload<int>::of(&QSpinBox::valueChanged), this, markSamplers);
+    for (auto *sb : {m_chatTemp, m_chatTopP, m_chatMinP,
+                     m_executeTemp, m_executeTopP, m_executeMinP,
+                     m_toolTemp, m_toolTopP, m_toolMinP})
+        connect(sb, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, markSamplers);
 
+    layout->addStretch();
     return w;
 }
 
-// ─── Agent Tab ───────────────────────────────────────────────────────────────
 QWidget *ConfigDialog::createAgentTab()
 {
     auto *w      = new QWidget;
@@ -179,7 +195,6 @@ QWidget *ConfigDialog::createAgentTab()
     return w;
 }
 
-// ─── Logging Tab ─────────────────────────────────────────────────────────────
 QWidget *ConfigDialog::createLoggingTab()
 {
     auto *w      = new QWidget;
@@ -223,75 +238,46 @@ QWidget *ConfigDialog::createLoggingTab()
     return w;
 }
 
-// ─── Template & Prompt Tab ───────────────────────────────────────────────────
-// Zwei Gruppen:
-//   1. Chat-Template: ComboBox mit Presets + Info-Label + Custom-Editor
-//   2. User System-Prompt: freier Text der dem MCP-Prompt vorangestellt wird
-//
-// Neustart-Hinweis für Template-Änderungen — der Prompt selbst ist
-// sofort wirksam nach /clear (onClearChat() ruft buildFullSystemPrompt() auf).
 QWidget *ConfigDialog::createTemplateTab()
 {
     auto *w      = new QWidget;
     auto *layout = new QVBoxLayout(w);
     layout->setSpacing(12);
 
-    // ── Chat-Template Gruppe ──────────────────────────────────────────────
+    // ── Chat-Template ─────────────────────────────────────────────────────
     auto *tmplGroup  = new QGroupBox("Chat-Template ⚠ (Neustart erforderlich)");
     auto *tmplLayout = new QVBoxLayout(tmplGroup);
 
-    // ComboBox: jeder Eintrag trägt den Preset-Enum-Wert als UserData (int).
-    // Das erlaubt robustes Lesen ohne Abhängigkeit von der Reihenfolge.
     m_chatTemplateCombo = new QComboBox;
-    m_chatTemplateCombo->addItem(
-        ChatTemplate::presetName(ChatTemplate::Preset::Auto),
-        static_cast<int>(ChatTemplate::Preset::Auto));
-    m_chatTemplateCombo->addItem(
-        ChatTemplate::presetName(ChatTemplate::Preset::ChatML),
-        static_cast<int>(ChatTemplate::Preset::ChatML));
-    m_chatTemplateCombo->addItem(
-        ChatTemplate::presetName(ChatTemplate::Preset::Llama3),
-        static_cast<int>(ChatTemplate::Preset::Llama3));
-    m_chatTemplateCombo->addItem(
-        ChatTemplate::presetName(ChatTemplate::Preset::Gemma),
-        static_cast<int>(ChatTemplate::Preset::Gemma));
-    m_chatTemplateCombo->addItem(
-        ChatTemplate::presetName(ChatTemplate::Preset::Mistral),
-        static_cast<int>(ChatTemplate::Preset::Mistral));
-    m_chatTemplateCombo->addItem(
-        ChatTemplate::presetName(ChatTemplate::Preset::Custom),
-        static_cast<int>(ChatTemplate::Preset::Custom));
+    m_chatTemplateCombo->addItem(ChatTemplate::presetName(ChatTemplate::Preset::Auto),
+                                  static_cast<int>(ChatTemplate::Preset::Auto));
+    m_chatTemplateCombo->addItem(ChatTemplate::presetName(ChatTemplate::Preset::ChatML),
+                                  static_cast<int>(ChatTemplate::Preset::ChatML));
+    m_chatTemplateCombo->addItem(ChatTemplate::presetName(ChatTemplate::Preset::Llama3),
+                                  static_cast<int>(ChatTemplate::Preset::Llama3));
+    m_chatTemplateCombo->addItem(ChatTemplate::presetName(ChatTemplate::Preset::Gemma),
+                                  static_cast<int>(ChatTemplate::Preset::Gemma));
+    m_chatTemplateCombo->addItem(ChatTemplate::presetName(ChatTemplate::Preset::Mistral),
+                                  static_cast<int>(ChatTemplate::Preset::Mistral));
+    m_chatTemplateCombo->addItem(ChatTemplate::presetName(ChatTemplate::Preset::Custom),
+                                  static_cast<int>(ChatTemplate::Preset::Custom));
     tmplLayout->addWidget(m_chatTemplateCombo);
 
-    // Info-Label: zeigt was aus dem GGUF erkannt wurde
     m_detectedTemplateLabel = new QLabel("Erkanntes Template: (Modell noch nicht geladen)");
     m_detectedTemplateLabel->setStyleSheet("color: #555; font-size: 11px; font-style: italic;");
     m_detectedTemplateLabel->setWordWrap(true);
     tmplLayout->addWidget(m_detectedTemplateLabel);
 
-    // Custom-Editor: nur sichtbar wenn "Custom" gewählt
-    // Format: JSON-Objekt mit den Format-Strings
     m_customTemplateLabel = new QLabel("Custom Template (JSON):");
     m_customTemplateEdit  = new QTextEdit;
     m_customTemplateEdit->setMaximumHeight(110);
     m_customTemplateEdit->setAcceptRichText(false);
     m_customTemplateEdit->setFontFamily("monospace");
-    m_customTemplateEdit->setPlaceholderText(
-        "{\n"
-        "  \"systemStart\": \"<|im_start|>system\\n\",\n"
-        "  \"systemEnd\":   \"<|im_end|>\\n\",\n"
-        "  \"userStart\":   \"<|im_start|>user\\n\",\n"
-        "  \"userEnd\":     \"<|im_end|>\\n\",\n"
-        "  \"assistantStart\": \"<|im_start|>assistant\\n\",\n"
-        "  \"assistantEnd\":   \"\",\n"
-        "  \"toolRole\":       \"user\"\n"
-        "}");
     m_customTemplateLabel->setVisible(false);
     m_customTemplateEdit->setVisible(false);
     tmplLayout->addWidget(m_customTemplateLabel);
     tmplLayout->addWidget(m_customTemplateEdit);
 
-    // Sichtbarkeit des Custom-Editors steuern + Neustart-Flag setzen
     connect(m_chatTemplateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) {
         auto preset = static_cast<ChatTemplate::Preset>(
@@ -305,29 +291,64 @@ QWidget *ConfigDialog::createTemplateTab()
 
     layout->addWidget(tmplGroup);
 
-    // ── User System-Prompt Gruppe ──────────────────────────────────────────
-    // Sofort wirksam nach /clear — kein Neustart nötig.
+    // ── Tool-Call-Format (NEU) ─────────────────────────────────────────────
+    // Analog zu Chat-Template — Auto als Default, manuell überschreibbar.
+    // Wichtiger Unterschied: Mistral-Arrays werden sequenziell ausgeführt.
+    auto *toolFmtGroup  = new QGroupBox("Tool-Call-Format ⚠ (Neustart erforderlich)");
+    auto *toolFmtLayout = new QVBoxLayout(toolFmtGroup);
+
+    m_toolFormatCombo = new QComboBox;
+    using P = ToolCallFormat::Preset;
+    m_toolFormatCombo->addItem(ToolCallFormat::presetName(P::Auto),
+                                static_cast<int>(P::Auto));
+    m_toolFormatCombo->addItem(ToolCallFormat::presetName(P::QwenXmlTags),
+                                static_cast<int>(P::QwenXmlTags));
+    m_toolFormatCombo->addItem(ToolCallFormat::presetName(P::MistralNative),
+                                static_cast<int>(P::MistralNative));
+    m_toolFormatCombo->addItem(ToolCallFormat::presetName(P::Gemma4Google),
+                                static_cast<int>(P::Gemma4Google));
+    m_toolFormatCombo->addItem(ToolCallFormat::presetName(P::Llama3ToolUse),
+                                static_cast<int>(P::Llama3ToolUse));
+    m_toolFormatCombo->addItem(ToolCallFormat::presetName(P::Generic),
+                                static_cast<int>(P::Generic));
+    toolFmtLayout->addWidget(m_toolFormatCombo);
+
+    m_detectedToolFormatLabel = new QLabel("Aktives Tool-Format: (Modell noch nicht geladen)");
+    m_detectedToolFormatLabel->setStyleSheet("color: #555; font-size: 11px; font-style: italic;");
+    m_detectedToolFormatLabel->setWordWrap(true);
+    toolFmtLayout->addWidget(m_detectedToolFormatLabel);
+
+    auto *fmtHint = new QLabel(
+        "<small style='color:#888'>"
+        "<b>Auto:</b> Erkennung aus Modellname + GGUF-Template (empfohlen).<br>"
+        "<b>Mistral Native:</b> Unterstützt Arrays — mehrere Tool-Calls werden "
+        "sequenziell ausgeführt.<br>"
+        "<b>Gemma4/Google:</b> JSON in Code-Blöcken (```json)."
+        "</small>");
+    fmtHint->setWordWrap(true);
+    toolFmtLayout->addWidget(fmtHint);
+
+    connect(m_toolFormatCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) { m_restartNeeded = true; m_restartHint->show(); });
+
+    layout->addWidget(toolFmtGroup);
+
+    // ── User System-Prompt ─────────────────────────────────────────────────
     auto *promptGroup  = new QGroupBox("User System-Prompt  (wirksam nach /clear)");
     auto *promptLayout = new QVBoxLayout(promptGroup);
 
     m_userSystemPrompt = new QTextEdit;
     m_userSystemPrompt->setAcceptRichText(false);
-    m_userSystemPrompt->setMinimumHeight(100);
+    m_userSystemPrompt->setMinimumHeight(80);
     m_userSystemPrompt->setPlaceholderText(
         "Optionaler Text der dem Modell vorangestellt wird.\n\n"
-        "Beispiel:\n"
-        "Du bist ein hilfreicher C++ Programmierer. "
-        "Antworte präzise und auf Deutsch.\n\n"
         "Leer lassen für Standard-Verhalten.");
     promptLayout->addWidget(m_userSystemPrompt);
 
-    // Erklärung wie der System-Prompt zusammengebaut wird
     auto *promptHint = new QLabel(
         "<small style='color:#888'>"
-        "Der vollständige System-Prompt besteht aus:<br>"
-        "<b>1.</b> Diesem Text &nbsp;← du bist hier<br>"
-        "<b>2.</b> MCP Tool-Beschreibungen (automatisch)<br>"
-        "Änderungen werden nach <b>/clear</b> oder Neustart übernommen."
+        "System-Prompt = Dieser Text + MCP Tool-Beschreibungen (automatisch).<br>"
+        "Änderungen nach <b>/clear</b> oder Neustart aktiv."
         "</small>");
     promptHint->setWordWrap(true);
     promptLayout->addWidget(promptHint);
@@ -338,7 +359,6 @@ QWidget *ConfigDialog::createTemplateTab()
     return w;
 }
 
-// ─── loadFromConfig ──────────────────────────────────────────────────────────
 void ConfigDialog::loadFromConfig()
 {
     const AppConfig &cfg = AppConfig::instance();
@@ -351,6 +371,11 @@ void ConfigDialog::loadFromConfig()
     m_chatTemp->setValue(cfg.chatTemp());
     m_chatTopP->setValue(cfg.chatTopP());
     m_chatMinP->setValue(cfg.chatMinP());
+
+    m_executeTopK->setValue(cfg.executeTopK());
+    m_executeTemp->setValue(cfg.executeTemp());
+    m_executeTopP->setValue(cfg.executeTopP());
+    m_executeMinP->setValue(cfg.executeMinP());
 
     m_toolTopK->setValue(cfg.toolTopK());
     m_toolTemp->setValue(cfg.toolTemp());
@@ -368,8 +393,7 @@ void ConfigDialog::loadFromConfig()
     m_chatLogDir->setText(cfg.chatLogDir());
     m_tavilyApiKey->setText(cfg.tavilyApiKey());
 
-    // ── Template & Prompt Tab ─────────────────────────────────────────────
-    // ComboBox auf gespeichertes Preset setzen
+    // Chat-Template
     int savedPreset = static_cast<int>(cfg.chatTemplatePreset());
     for (int i = 0; i < m_chatTemplateCombo->count(); ++i) {
         if (m_chatTemplateCombo->itemData(i).toInt() == savedPreset) {
@@ -377,33 +401,38 @@ void ConfigDialog::loadFromConfig()
             break;
         }
     }
-
-    // Custom-Template
     m_customTemplateEdit->setPlainText(cfg.customChatTemplate());
 
-    // Erkanntes GGUF-Template anzeigen
     QString detected = cfg.detectedJinjaTemplate();
     if (detected.isEmpty()) {
-        m_detectedTemplateLabel->setText(
-            "Erkanntes Template aus GGUF: (keines eingebettet oder Modell noch nicht geladen)");
+        m_detectedTemplateLabel->setText("Erkanntes Template: (keines im GGUF)");
     } else {
         ChatTemplate::Preset p = ChatTemplate::detectFromJinja(detected);
         m_detectedTemplateLabel->setText(
-            QString("Erkanntes Template aus GGUF: %1")
-            .arg(ChatTemplate::presetName(p)));
+            QString("Erkanntes Template: %1").arg(ChatTemplate::presetName(p)));
     }
 
-    // User System-Prompt
+    // Tool-Call-Format (NEU)
+    int savedToolFmt = static_cast<int>(cfg.toolCallFormatPreset());
+    for (int i = 0; i < m_toolFormatCombo->count(); ++i) {
+        if (m_toolFormatCombo->itemData(i).toInt() == savedToolFmt) {
+            m_toolFormatCombo->setCurrentIndex(i);
+            break;
+        }
+    }
+    ToolCallFormat::Preset effective = cfg.effectiveToolCallFormat();
+    m_detectedToolFormatLabel->setText(
+        QString("Aktives Tool-Format: %1")
+        .arg(ToolCallFormat::presetName(effective)));
+
     m_userSystemPrompt->setPlainText(cfg.userSystemPrompt());
 
-    // Flags zurücksetzen
     m_samplersChanged = false;
     m_restartNeeded   = false;
     m_loggingChanged  = false;
     m_restartHint->hide();
 }
 
-// ─── saveToConfig ────────────────────────────────────────────────────────────
 void ConfigDialog::saveToConfig()
 {
     AppConfig &cfg = AppConfig::instance();
@@ -417,6 +446,11 @@ void ConfigDialog::saveToConfig()
     cfg.setChatTopP(static_cast<float>(m_chatTopP->value()));
     cfg.setChatMinP(static_cast<float>(m_chatMinP->value()));
 
+    cfg.setExecuteTopK(m_executeTopK->value());
+    cfg.setExecuteTemp(static_cast<float>(m_executeTemp->value()));
+    cfg.setExecuteTopP(static_cast<float>(m_executeTopP->value()));
+    cfg.setExecuteMinP(static_cast<float>(m_executeMinP->value()));
+
     cfg.setToolTopK(m_toolTopK->value());
     cfg.setToolTemp(static_cast<float>(m_toolTemp->value()));
     cfg.setToolTopP(static_cast<float>(m_toolTopP->value()));
@@ -429,9 +463,6 @@ void ConfigDialog::saveToConfig()
     int w = m_deadlockWarn->value();
     int r = qMax(m_deadlockRedirect->value(), w + 1);
     int a = qMax(m_deadlockAbort->value(),    r + 1);
-    m_deadlockWarn->setValue(w);
-    m_deadlockRedirect->setValue(r);
-    m_deadlockAbort->setValue(a);
     cfg.setDeadlockWarn(w);
     cfg.setDeadlockRedirect(r);
     cfg.setDeadlockAbort(a);
@@ -440,17 +471,21 @@ void ConfigDialog::saveToConfig()
     cfg.setChatLogDir(m_chatLogDir->text());
     cfg.setTavilyApiKey(m_tavilyApiKey->text());
 
-    // ── Template & Prompt Tab ─────────────────────────────────────────────
-    auto preset = static_cast<ChatTemplate::Preset>(
+    auto chatPreset = static_cast<ChatTemplate::Preset>(
         m_chatTemplateCombo->currentData().toInt());
-    cfg.setChatTemplatePreset(preset);
+    cfg.setChatTemplatePreset(chatPreset);
     cfg.setCustomChatTemplate(m_customTemplateEdit->toPlainText());
+
+    // Tool-Call-Format (NEU)
+    auto toolFmt = static_cast<ToolCallFormat::Preset>(
+        m_toolFormatCombo->currentData().toInt());
+    cfg.setToolCallFormatPreset(toolFmt);
+
     cfg.setUserSystemPrompt(m_userSystemPrompt->toPlainText());
 
     cfg.save();
 }
 
-// ─── onAccepted ──────────────────────────────────────────────────────────────
 void ConfigDialog::onAccepted()
 {
     saveToConfig();
@@ -461,8 +496,8 @@ void ConfigDialog::onAccepted()
     if (m_restartNeeded) {
         emit restartRequired();
         QMessageBox::information(this, "Neustart erforderlich",
-            "Modell-Pfad, Kontext und Chat-Template werden beim nächsten "
-            "Programmstart übernommen.\n\n"
+            "Modell-Pfad, Kontext, Chat-Template und Tool-Format werden beim "
+            "nächsten Programmstart übernommen.\n\n"
             "Sampler-Einstellungen und User System-Prompt sind bereits aktiv\n"
             "(System-Prompt nach /clear).");
     }
@@ -473,7 +508,6 @@ void ConfigDialog::onAccepted()
     accept();
 }
 
-// ─── Slots ───────────────────────────────────────────────────────────────────
 void ConfigDialog::onBrowseModel()
 {
     QString path = QFileDialog::getOpenFileName(
@@ -497,13 +531,14 @@ void ConfigDialog::onBrowseLogDir()
 
 void ConfigDialog::resetSamplerDefaults()
 {
-    m_chatTopK->setValue(40);  m_chatTemp->setValue(0.7);
-    m_chatTopP->setValue(0.95); m_chatMinP->setValue(0.05);
-    m_toolTopK->setValue(20);  m_toolTemp->setValue(0.1);
-    m_toolTopP->setValue(0.50); m_toolMinP->setValue(0.05);
+    m_chatTopK->setValue(40);    m_chatTemp->setValue(0.7);
+    m_chatTopP->setValue(0.95);  m_chatMinP->setValue(0.05);
+    m_executeTopK->setValue(20); m_executeTemp->setValue(0.2);
+    m_executeTopP->setValue(0.60); m_executeMinP->setValue(0.05);
+    m_toolTopK->setValue(20);    m_toolTemp->setValue(0.1);
+    m_toolTopP->setValue(0.50);  m_toolMinP->setValue(0.05);
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
 QDoubleSpinBox *ConfigDialog::makeDoubleSpinBox(double min, double max,
                                                  double step, int decimals, double value)
 {

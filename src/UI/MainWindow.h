@@ -2,12 +2,12 @@
 #include <QMainWindow>
 #include <QScrollBar>
 #include <QEvent>
-#include "Agent.h"
-#include "ConfigDialog.h"
-#include "EditorDock.h"
-#include "PlannerDock.h"
-#include "NodeGraphView.h"
-#include "SearchBar.h"
+#include "Agent/Agent.h"
+#include "UI/ConfigDialog.h"
+#include "UI/EditorDock.h"
+#include "UI/PlannerDock.h"
+#include "UI/NodeGraphView.h"
+#include "UI/SearchBar.h"
 
 
 namespace Ui { class MainWindow; }

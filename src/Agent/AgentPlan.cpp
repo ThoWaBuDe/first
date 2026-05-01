@@ -1,7 +1,7 @@
 #include "AgentPlan.h"
 #include "Agent.h"
 #include "AgentUtils.h"
-#include "AppConfig.h"
+#include "Config/AppConfig.h"
 #include <QJsonDocument>
 #include <QJsonArray>
 
@@ -176,22 +176,34 @@ bool AgentPlan::isInternalPlanTool(const QString &toolName) const
 // Dispatcht auf interne Plan-Tools ODER externe Lese-Tools.
 void AgentPlan::handlePlanToolCall(const QString &fullResponse, uint32_t sessionId)
 {
-    int start     = fullResponse.indexOf("<tool_call>") + 11;
-    int end       = fullResponse.indexOf("</tool_call>", start);
-    QString block = fullResponse.mid(start, end - start).trimmed();
+    // ── NEU: format-agnostisches Parsing via ToolCallParser ───────────────
+    ToolCallFormat::Preset fmt = m_agent.m_activeToolFormat;
+    ParsedToolCall call = ToolCallParser::parseFirst(fullResponse, fmt);
 
-    QJsonParseError pe;
-    QJsonDocument doc = QJsonDocument::fromJson(block.toUtf8(), &pe);
-
-    if (doc.isNull()) {
-        QString repaired = AgentUtils::repairJson(block);
-        if (!repaired.isEmpty())
-            doc = QJsonDocument::fromJson(repaired.toUtf8());
-        else {
+    if (!call.valid) {
+        // Repair-Versuch für XML-Format
+        if (fmt == ToolCallFormat::Preset::QwenXmlTags ||
+            fmt == ToolCallFormat::Preset::Generic) {
+            int start = fullResponse.indexOf("<tool_call>") + 11;
+            int end   = fullResponse.indexOf("</tool_call>", start);
+            if (start > 10 && end > start) {
+                QString block = fullResponse.mid(start, end - start).trimmed();
+                QString repaired = AgentUtils::repairJson(block);
+                if (!repaired.isEmpty()) {
+                    QJsonDocument doc = QJsonDocument::fromJson(repaired.toUtf8());
+                    if (!doc.isNull()) {
+                        call = ParsedToolCall::ok(
+                            doc.object().value("name").toString(),
+                            doc.object().value("arguments").toObject());
+                    }
+                }
+            }
+        }
+        if (!call.valid) {
             m_agent.m_chatModel.addToolResult("json_error",
-                QString("[SYSTEM: Ungültiges JSON. Fehler: %1. "
-                        "Bitte korrektes JSON verwenden.]")
-                .arg(pe.errorString()));
+                                              QString("[SYSTEM: Ungültiges JSON. Fehler: %1. "
+                                                      "Bitte korrektes JSON verwenden.]")
+                                                  .arg(call.error));
             m_agent.m_generating      = true;
             m_agent.m_generatedTokens = 0;
             m_agent.m_currentResponse.clear();
@@ -204,21 +216,20 @@ void AgentPlan::handlePlanToolCall(const QString &fullResponse, uint32_t session
         }
     }
 
-    QString     toolName = doc.object().value("name").toString();
-    QJsonObject toolArgs = doc.object().value("arguments").toObject();
+    QString     toolName = call.name;
+    QJsonObject toolArgs = call.arguments;
 
     emit m_agent.appendTools(
         QString("<b>Plan-Tool: %1</b><br><pre>%2</pre>")
-        .arg(toolName.toHtmlEscaped(),
-             QString::fromUtf8(QJsonDocument(toolArgs)
-                               .toJson(QJsonDocument::Indented)).toHtmlEscaped()),
+            .arg(toolName.toHtmlEscaped(),
+                 QString::fromUtf8(QJsonDocument(toolArgs)
+                                       .toJson(QJsonDocument::Indented)).toHtmlEscaped()),
         "tool");
 
     // ── Interne Plan-Tools ────────────────────────────────────────────────
     if (isInternalPlanTool(toolName)) {
         QString result;
         bool    isDone = false;
-
         if (toolName == TOOL_CREATE_NODE)
             result = handleCreateNode(toolArgs);
         else if (toolName == TOOL_SET_DEPENDS_ON)
@@ -229,34 +240,31 @@ void AgentPlan::handlePlanToolCall(const QString &fullResponse, uint32_t session
             result = handlePlanDone(toolArgs, sessionId);
             isDone = true;
         }
-
         emit m_agent.appendTools(
             QString("<b>Plan-Tool Ergebnis:</b><br><pre>%1</pre>")
-            .arg(result.toHtmlEscaped()), "tool");
-
+                .arg(result.toHtmlEscaped()), "tool");
         if (!isDone)
             sendToolResult(toolName, result, false, sessionId);
-        // Bei plan_done: handlePlanDone hat bereits alles erledigt
         return;
     }
 
     // ── Externe Lese-Tools ────────────────────────────────────────────────
     if (!Agent::PLAN_ALLOWED_TOOLS.contains(toolName)) {
         QString errMsg = QString(
-            "[SYSTEM: Tool '%1' ist im Plan-Modus VERBOTEN. "
-            "Nur Lese-Tools und Plan-Tools erlaubt.]")
-            .arg(toolName);
+                             "[SYSTEM: Tool '%1' ist im Plan-Modus VERBOTEN. "
+                             "Nur Lese-Tools und Plan-Tools erlaubt.]")
+                             .arg(toolName);
         emit m_agent.appendTools(
             QString("Plan-Whitelist: <b>%1</b> verboten.")
-            .arg(toolName.toHtmlEscaped()), "error");
+                .arg(toolName.toHtmlEscaped()), "error");
         sendToolResult(toolName, errMsg, false, sessionId);
         return;
     }
 
     if (!m_agent.m_mcp.containsTool(toolName)) {
         sendToolResult(toolName,
-            QString("Fehler: Tool '%1' nicht verfügbar.").arg(toolName),
-            false, sessionId);
+                       QString("Fehler: Tool '%1' nicht verfügbar.").arg(toolName),
+                       false, sessionId);
         return;
     }
 
@@ -264,54 +272,55 @@ void AgentPlan::handlePlanToolCall(const QString &fullResponse, uint32_t session
     QString tKey = AgentUtils::toolCallKey(toolName, toolArgs);
 
     m_agent.m_mcp.callTool(toolName, toolArgs,
-        [this, toolName, tKey, sessionId](QString result, QString error) {
-            if (sessionId != m_agent.m_sessionId) return;
+                           [this, toolName, tKey, sessionId](QString result, QString error) {
+                               if (sessionId != m_agent.m_sessionId) return;
 
-            QString toolResult = error.isEmpty() ? result : ("Fehler: " + error);
-            bool    isErr      = !error.isEmpty();
+                               QString toolResult = error.isEmpty() ? result : ("Fehler: " + error);
+                               bool    isErr      = !error.isEmpty();
 
-            if (!isErr &&
-                toolResult.length() > AppConfig::instance().maxToolResultChars()) {
-                int maxChars = AppConfig::instance().maxToolResultChars();
-                int cut = toolResult.lastIndexOf('\n', maxChars);
-                if (cut < maxChars / 2) cut = maxChars;
-                toolResult = toolResult.left(cut)
-                    + QString("\n\n[... gekürzt: %1 von %2 Zeichen.]")
-                      .arg(cut).arg(result.length());
-            }
+                               if (!isErr &&
+                                   toolResult.length() > AppConfig::instance().maxToolResultChars()) {
+                                   int maxChars = AppConfig::instance().maxToolResultChars();
+                                   int cut = toolResult.lastIndexOf('\n', maxChars);
+                                   if (cut < maxChars / 2) cut = maxChars;
+                                   toolResult = toolResult.left(cut)
+                                                + QString("\n\n[... gekürzt: %1 von %2 Zeichen.]")
+                                                      .arg(cut).arg(result.length());
+                               }
 
-            if (isErr) {
-                int &failCount = m_agent.m_toolFailCount[tKey];
-                ++failCount;
-                if (failCount >= AgentUtils::DEADLOCK_ABORT) {
-                    emit m_agent.appendTools(
-                        QString("<b>Plan: DEADLOCK ABBRUCH</b> '%1'")
-                        .arg(toolName.toHtmlEscaped()), "error");
-                    m_agent.m_toolFailCount.remove(tKey);
-                    m_agent.m_mode = AgentMode::Chat;
-                    emit m_agent.modeChanged(m_agent.m_mode);
-                    m_agent.m_chatModel.setSystemPrompt(
-                        m_agent.buildFullSystemPrompt());
-                    emit m_agent.inputEnabled(true);
-                    emit m_agent.statusChanged("Plan fehlgeschlagen");
-                    return;
-                }
-                toolResult += "\n\n" +
-                    AgentUtils::deadlockEscalationPrompt(toolName, failCount);
-            } else {
-                m_agent.m_toolFailCount.remove(tKey);
-            }
+                               if (isErr) {
+                                   int &failCount = m_agent.m_toolFailCount[tKey];
+                                   ++failCount;
+                                   if (failCount >= AgentUtils::DEADLOCK_ABORT) {
+                                       emit m_agent.appendTools(
+                                           QString("<b>Plan: DEADLOCK ABBRUCH</b> '%1'")
+                                               .arg(toolName.toHtmlEscaped()), "error");
+                                       m_agent.m_toolFailCount.remove(tKey);
+                                       m_agent.m_mode = AgentMode::Chat;
+                                       emit m_agent.modeChanged(m_agent.m_mode);
+                                       m_agent.m_chatModel.setSystemPrompt(
+                                           m_agent.buildFullSystemPrompt());
+                                       emit m_agent.inputEnabled(true);
+                                       emit m_agent.statusChanged("Plan fehlgeschlagen");
+                                       return;
+                                   }
+                                   toolResult += "\n\n" +
+                                                 AgentUtils::deadlockEscalationPrompt(toolName, failCount);
+                               } else {
+                                   m_agent.m_toolFailCount.remove(tKey);
+                               }
 
-            emit m_agent.appendTools(
-                QString("<b>Plan-Ergebnis [%1]:</b><br><pre>%2</pre>")
-                .arg(toolName.toHtmlEscaped(),
-                     toolResult.left(600).toHtmlEscaped() +
-                     (toolResult.length() > 600 ? "\n..." : "")),
-                isErr ? "error" : "tool");
+                               emit m_agent.appendTools(
+                                   QString("<b>Plan-Ergebnis [%1]:</b><br><pre>%2</pre>")
+                                       .arg(toolName.toHtmlEscaped(),
+                                            toolResult.left(600).toHtmlEscaped() +
+                                                (toolResult.length() > 600 ? "\n..." : "")),
+                                   isErr ? "error" : "tool");
 
-            sendToolResult(toolName, toolResult, false, sessionId);
-        });
+                               sendToolResult(toolName, toolResult, false, sessionId);
+                           });
 }
+
 
 // ─── handleCreateNode ─────────────────────────────────────────────────────────
 // Legt einen neuen Node im TaskTree an.

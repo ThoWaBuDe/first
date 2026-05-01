@@ -1,10 +1,3 @@
-#include "LlamaWorker.h"
-#include "ChatModel.h"
-#include "AppConfig.h"
-
-#include "llama.h"
-#include "ggml.h"
-
 #include <QDebug>
 #include <vector>
 #include <string>
@@ -12,6 +5,15 @@
 
 #include <fcntl.h>
 #include <unistd.h>
+
+#include "llama.h"
+#include "ggml.h"
+
+#include "AI/LlamaWorker.h"
+#include "Chat/ChatModel.h"
+#include "Config/AppConfig.h"
+
+
 
 #define AS_MODEL(p)   reinterpret_cast<llama_model*>(p)
 #define AS_CTX(p)     reinterpret_cast<llama_context*>(p)

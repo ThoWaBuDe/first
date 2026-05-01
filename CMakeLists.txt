@@ -17,61 +17,61 @@ pkg_check_modules(LLAMA REQUIRED IMPORTED_TARGET llama)
 # ─── Sources ────────────────────────────────────────────────────────────────
 set(SOURCES
     src/main.cpp
-    src/MainWindow.cpp
+    src/UI/MainWindow.cpp
 
     # Agent — aufgeteilt in Teilklassen (Refactoring)
-    src/Agent.cpp
-    src/AgentChat.cpp
-    src/AgentPlan.cpp
-    src/AgentExecute.cpp
-    src/AgentAssemble.cpp
-    src/AgentUtils.cpp
+    src/Agent/Agent.cpp
+    src/Agent/AgentChat.cpp
+    src/Agent/AgentPlan.cpp
+    src/Agent/AgentExecute.cpp
+    src/Agent/AgentAssemble.cpp
+    src/Agent/AgentUtils.cpp
 
-    src/CommandProcessor.cpp
-    src/LlamaWorker.cpp
-    src/McpClient.cpp
-    src/McpManager.cpp
-    src/ChatModel.cpp
-    src/AppConfig.cpp
-    src/ChatLogger.cpp
-    src/ConfigDialog.cpp
-    src/EditorDock.cpp
-    src/PlannerDock.cpp
-    src/TaskNodeDialog.cpp
+    src/Task/CommandProcessor.cpp
+    src/AI/LlamaWorker.cpp
+    src/MCP/McpClient.cpp
+    src/MCP/McpManager.cpp
+    src/Chat/ChatModel.cpp
+    src/Config/AppConfig.cpp
+    src/Chat/ChatLogger.cpp
+    src/UI/ConfigDialog.cpp
+    src/UI/EditorDock.cpp
+    src/UI/PlannerDock.cpp
+    src/UI/TaskNodeDialog.cpp
 )
 
 set(HEADERS
-    src/MainWindow.h
-    src/Agent.h
-    src/AgentChat.h
-    src/AgentPlan.h
-    src/AgentExecute.h
-    src/AgentAssemble.h
-    src/AgentUtils.h
-    src/CommandProcessor.h
-    src/LlamaWorker.h
-    src/McpClient.h
-    src/McpManager.h
-    src/ChatModel.h
-    src/AppConfig.h
-    src/ChatLogger.h
-    src/ConfigDialog.h
-    src/EditorDock.h
-    src/PlannerDock.h
-    src/TaskNode.h
-    src/TaskTree.h
-    src/TaskTreeModel.h
-    src/TaskNodeDialog.h
-    src/ExecuteMemory.h
-    src/CodeAssembler.h
-    src/NodeGraphView.h
-    src/ChatTemplate.h
-    src/SearchBar.h
-    src/ToolCallFormat.h
+    src/UI/MainWindow.h
+    src/Agent/Agent.h
+    src/Agent/AgentChat.h
+    src/Agent/AgentPlan.h
+    src/Agent/AgentExecute.h
+    src/Agent/AgentAssemble.h
+    src/Agent/AgentUtils.h
+    src/Task/CommandProcessor.h
+    src/AI/LlamaWorker.h
+    src/MCP/McpClient.h
+    src/MCP/McpManager.h
+    src/Chat/ChatModel.h
+    src/Config/AppConfig.h
+    src/Chat/ChatLogger.h
+    src/UI/ConfigDialog.h
+    src/UI/EditorDock.h
+    src/UI/PlannerDock.h
+    src/Task/TaskNode.h
+    src/Task/TaskTree.h
+    src/Task/TaskTreeModel.h
+    src/UI/TaskNodeDialog.h
+    src/AI/ExecuteMemory.h
+    src/Task/CodeAssembler.h
+    src/UI/NodeGraphView.h
+    src/Chat/ChatTemplate.h
+    src/UI/SearchBar.h
+    src/Chat/ToolCallFormat.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}
-    src/MainWindow.ui)
+    src/UI/MainWindow.ui)
 
 # ─── Include-Pfade ──────────────────────────────────────────────────────────
 target_include_directories(LlamaQt PRIVATE

@@ -2,7 +2,8 @@
 #include <QString>
 #include <QJsonObject>
 #include <cstdint>
-#include "ToolCallFormat.h"
+
+#include "Chat/ToolCallFormat.h"
 
 class Agent;
 

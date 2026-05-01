@@ -1,6 +1,6 @@
-#include "AgentAssemble.h"
-#include "Agent.h"
-#include "AppConfig.h"
+#include "Agent/AgentAssemble.h"
+#include "Agent/Agent.h"
+#include "Config/AppConfig.h"
 #include <QDir>
 #include <QFileInfo>
 

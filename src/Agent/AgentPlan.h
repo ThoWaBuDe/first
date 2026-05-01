@@ -24,6 +24,7 @@
 #include <QJsonObject>
 #include <QHash>
 #include <cstdint>
+#include "Chat/ToolCallFormat.h"
 
 class Agent;
 struct TaskNode;
