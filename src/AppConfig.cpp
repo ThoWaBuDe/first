@@ -26,6 +26,10 @@ void AppConfig::load()
         m_settings.value("chat_template_preset",
                          static_cast<int>(ChatTemplate::Preset::Auto)).toInt());
     m_customChatTemplate = m_settings.value("custom_chat_template", "").toString();
+    // NEU: Tool-Call-Format
+    m_toolCallFormat = static_cast<ToolCallFormat::Preset>(
+        m_settings.value("tool_call_format",
+                         static_cast<int>(ToolCallFormat::Preset::Auto)).toInt());
     m_settings.endGroup();
 
     m_settings.beginGroup("SamplerChat");
@@ -42,9 +46,6 @@ void AppConfig::load()
     m_toolMinP = m_settings.value("min_p", m_toolMinP).toFloat();
     m_settings.endGroup();
 
-    // ── NEU: SamplerExecute (Punkt I) ─────────────────────────────────────
-    // Eigene Gruppe damit ältere Configs ohne diese Gruppe sauber auf
-    // die Defaults fallen (m_executeTopK etc. sind bereits initialisiert).
     m_settings.beginGroup("SamplerExecute");
     m_executeTopK = m_settings.value("top_k", m_executeTopK).toInt();
     m_executeTemp = m_settings.value("temp",  m_executeTemp).toFloat();
@@ -111,6 +112,8 @@ void AppConfig::save()
     m_settings.setValue("batch_size",           m_batchSize);
     m_settings.setValue("chat_template_preset", static_cast<int>(m_chatTemplatePreset));
     m_settings.setValue("custom_chat_template", m_customChatTemplate);
+    // NEU: Tool-Call-Format
+    m_settings.setValue("tool_call_format",     static_cast<int>(m_toolCallFormat));
     m_settings.endGroup();
 
     m_settings.beginGroup("SamplerChat");
@@ -123,7 +126,6 @@ void AppConfig::save()
     m_settings.setValue("top_p", m_toolTopP); m_settings.setValue("min_p", m_toolMinP);
     m_settings.endGroup();
 
-    // ── NEU: SamplerExecute (Punkt I) ─────────────────────────────────────
     m_settings.beginGroup("SamplerExecute");
     m_settings.setValue("top_k", m_executeTopK); m_settings.setValue("temp",  m_executeTemp);
     m_settings.setValue("top_p", m_executeTopP); m_settings.setValue("min_p", m_executeMinP);

@@ -11,7 +11,6 @@
 #include <QFileInfo>
 #include <QDir>
 
-// ── Whitelists ────────────────────────────────────────────────────────────────
 const QStringList Agent::PLAN_ALLOWED_TOOLS = {
     "read_file", "list_dir", "get_symbol", "get_project_index",
     "rebuild_index", "get_time", "sys_info", "disk_free", "get_pwd",
@@ -24,7 +23,6 @@ const QStringList Agent::EXECUTE_ALLOWED_TOOLS = {
     "web_search", "get_time", "sys_info", "get_pwd", "disk_free",
 };
 
-// ─── Konstruktor ──────────────────────────────────────────────────────────────
 Agent::Agent(const QString &modelPath, QObject *parent)
     : QObject(parent)
     , m_modelPath(modelPath)
@@ -32,8 +30,6 @@ Agent::Agent(const QString &modelPath, QObject *parent)
     , m_mcp(this)
     , m_commands(this)
 {
-    // Teilklassen erzeugen (Komposition)
-    // Alle bekommen *this als Referenz — lifetime ist durch Agent garantiert.
     m_chat     = new AgentChat(*this);
     m_plan     = new AgentPlan(*this);
     m_execute  = new AgentExecute(*this);
@@ -44,6 +40,7 @@ Agent::Agent(const QString &modelPath, QObject *parent)
 
     qRegisterMetaType<LlamaWorker::SamplerProfile>();
     qRegisterMetaType<ChatTemplate::Preset>();
+    qRegisterMetaType<ToolCallFormat::Preset>(); // NEU
     qRegisterMetaType<QVector<ChatMessage>>("QVector<ChatMessage>");
     qRegisterMetaType<AgentMode>();
 
@@ -61,9 +58,31 @@ Agent::Agent(const QString &modelPath, QObject *parent)
             m_worker, &QObject::deleteLater);
     connect(m_worker, &LlamaWorker::chatTemplateDetected,
             this,     &Agent::onChatTemplateDetected);
+    // NEU: Tool-Call-Format Detection verbinden
+    connect(m_worker, &LlamaWorker::toolCallFormatDetected,
+            this,     &Agent::onToolFormatDetected);
+
     connect(&m_mcp, &McpManager::serverDied, this, [this](const QString &name) {
         emit appendTools(
             QString("MCP-Server gestorben: %1").arg(name), "error");
+    });
+    connect(&m_mcp, &McpManager::serverRestarting,
+            this, [this](const QString &name, int attempt, int delaySec) {
+        emit appendTools(
+            QString("<b>MCP Neustart:</b> <i>%1</i> — Versuch %2/3 in %3s...")
+            .arg(name.toHtmlEscaped()).arg(attempt).arg(delaySec), "system");
+    });
+    connect(&m_mcp, &McpManager::serverRestored,
+            this, [this](const QString &name) {
+        emit appendTools(
+            QString("<b>MCP wiederhergestellt:</b> <i>%1</i>")
+            .arg(name.toHtmlEscaped()), "system");
+    });
+    connect(&m_mcp, &McpManager::serverGaveUp,
+            this, [this](const QString &name) {
+        emit appendTools(
+            QString("<b>MCP aufgegeben:</b> <i>%1</i> — Bitte LlamaQt neu starten.")
+            .arg(name.toHtmlEscaped()), "error");
     });
 }
 
@@ -72,15 +91,12 @@ Agent::~Agent()
     if (m_worker) m_worker->stopGeneration();
     m_workerThread.quit();
     m_workerThread.wait(3000);
-
-    // Teilklassen löschen (keine Qt-Parent-Ownership nötig, da kein QObject)
     delete m_chat;
     delete m_plan;
     delete m_execute;
     delete m_assemble;
 }
 
-// ─── start ────────────────────────────────────────────────────────────────────
 void Agent::start()
 {
     m_workerThread.start();
@@ -115,14 +131,12 @@ void Agent::start()
     });
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// SYSTEM-PROMPT + CHAT-TEMPLATE
-// ═════════════════════════════════════════════════════════════════════════════
-
+// ─── buildFullSystemPrompt ────────────────────────────────────────────────────
+// NEU: übergibt m_activeToolFormat an McpManager
 QString Agent::buildFullSystemPrompt() const
 {
     QString userPart = AppConfig::instance().userSystemPrompt().trimmed();
-    QString mcpPart  = m_mcp.buildToolsSystemPrompt();
+    QString mcpPart  = m_mcp.buildToolsSystemPrompt(m_activeToolFormat); // ← Format
     if (userPart.isEmpty()) return mcpPart;
     return userPart + "\n\n" + mcpPart;
 }
@@ -135,8 +149,8 @@ void Agent::applyChatTemplate()
         tmpl = ChatTemplate::forPreset(m_detectedPreset);
     } else if (preset == ChatTemplate::Preset::Custom) {
         emit appendTools(
-            "Custom Chat-Template: Parsing noch nicht implementiert — "
-            "Fallback ChatML.", "system");
+            "Custom Chat-Template: Parsing noch nicht implementiert — Fallback ChatML.",
+            "system");
         tmpl = ChatTemplate::chatML();
     } else {
         tmpl = ChatTemplate::forPreset(preset);
@@ -161,8 +175,7 @@ void Agent::onChatTemplateDetected(const QString &jinjaTemplate,
     } else {
         if (userChoice == ChatTemplate::Preset::Auto) {
             emit appendTools(
-                QString("Chat-Template (Auto): <b>%1</b> — "
-                        "llama_chat_apply_template aktiv")
+                QString("Chat-Template (Auto): <b>%1</b>")
                 .arg(presetName.toHtmlEscaped()), "system");
         } else {
             QString chosenName = ChatTemplate::presetName(userChoice);
@@ -171,6 +184,44 @@ void Agent::onChatTemplateDetected(const QString &jinjaTemplate,
                 .arg(presetName.toHtmlEscaped(), chosenName.toHtmlEscaped()),
                 "system");
         }
+    }
+}
+
+// ─── onToolFormatDetected (NEU) ───────────────────────────────────────────────
+// Analogie zu onChatTemplateDetected — entscheidet Auto vs. manuell.
+// Setzt m_activeToolFormat und baut System-Prompt neu.
+void Agent::onToolFormatDetected(ToolCallFormat::Preset detectedFormat,
+                                  const QString &source)
+{
+    AppConfig &cfg = AppConfig::instance();
+    ToolCallFormat::Preset userChoice = cfg.toolCallFormatPreset();
+
+    ToolCallFormat::Preset effective;
+    if (userChoice == ToolCallFormat::Preset::Auto) {
+        effective = detectedFormat;
+    } else {
+        effective = userChoice;
+    }
+
+    m_activeToolFormat = effective;
+    cfg.setEffectiveToolCallFormat(effective);
+
+    // System-Prompt mit neuem Format neu aufbauen
+    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+
+    QString effectiveName = ToolCallFormat::presetName(effective);
+
+    if (userChoice == ToolCallFormat::Preset::Auto) {
+        emit appendTools(
+            QString("Tool-Format (Auto via %1): <b>%2</b>")
+            .arg(source.toHtmlEscaped(), effectiveName.toHtmlEscaped()),
+            "system");
+    } else {
+        emit appendTools(
+            QString("Tool-Format: erkannt=<i>%1</i>, eingestellt=<b>%2</b>")
+            .arg(ToolCallFormat::presetName(detectedFormat).toHtmlEscaped(),
+                 effectiveName.toHtmlEscaped()),
+            "system");
     }
 }
 
@@ -198,28 +249,22 @@ void Agent::onUserMessage(const QString &text)
             if (result.prompt.startsWith("__PLAN__:")) {
                 QString auftrag = result.prompt.mid(9);
                 emit appendChat(
-                    QString("<b>Plan-Modus:</b> %1")
-                    .arg(text.toHtmlEscaped()), "user");
+                    QString("<b>Plan-Modus:</b> %1").arg(text.toHtmlEscaped()), "user");
                 m_plan->startPlan(auftrag);
                 return;
             }
             if (result.prompt == "__EXECUTE__") {
                 if (m_taskTree.isEmpty()) {
-                    emit appendTools(
-                        "Kein Plan geladen. Bitte zuerst /plan oder /loadDB.",
-                        "error");
+                    emit appendTools("Kein Plan geladen.", "error");
                     emit inputEnabled(true);
                     return;
                 }
                 if (m_taskTree.nextPending() == nullptr) {
-                    emit appendTools(
-                        "Alle Nodes bereits erledigt. "
-                        "Neuen Plan erstellen mit /plan oder /loadDB.", "system");
+                    emit appendTools("Alle Nodes bereits erledigt.", "system");
                     emit inputEnabled(true);
                     return;
                 }
-                emit appendChat(
-                    "<b>[System]</b> Execute-Modus gestartet.", "system");
+                emit appendChat("<b>[System]</b> Execute-Modus gestartet.", "system");
                 m_execute->startExecute();
                 return;
             }
@@ -228,15 +273,11 @@ void Agent::onUserMessage(const QString &text)
                 bool ok2 = m_executeMemory.save();
                 if (ok1 && ok2) {
                     emit appendTools(
-                        QString("<b>DB gespeichert:</b> %1 Nodes, %2 Thoughts "
-                                "in <code>%3</code>")
+                        QString("<b>DB gespeichert:</b> %1 Nodes, %2 Thoughts")
                         .arg(m_taskTree.nodeCount())
-                        .arg(m_executeMemory.count())
-                        .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
-                        "system");
+                        .arg(m_executeMemory.count()), "system");
                 } else {
-                    emit appendTools(
-                        "<b>Fehler beim Speichern der DB.</b>", "error");
+                    emit appendTools("<b>Fehler beim Speichern der DB.</b>", "error");
                 }
                 emit inputEnabled(true);
                 return;
@@ -247,29 +288,32 @@ void Agent::onUserMessage(const QString &text)
                 if (ok1) {
                     emit taskTreeUpdated();
                     emit appendTools(
-                        QString("<b>DB geladen:</b> %1 Nodes, %2 Thoughts "
-                                "aus <code>%3</code>")
+                        QString("<b>DB geladen:</b> %1 Nodes, %2 Thoughts")
                         .arg(m_taskTree.nodeCount())
-                        .arg(m_executeMemory.count())
-                        .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
-                        "system");
+                        .arg(m_executeMemory.count()), "system");
                 } else {
-                    emit appendTools(
-                        "<b>Fehler beim Laden der DB.</b>", "error");
+                    emit appendTools("<b>Fehler beim Laden der DB.</b>", "error");
                 }
                 emit inputEnabled(true);
                 return;
             }
             if (result.prompt == "__CODEASSEMBLE__") {
                 if (m_taskTree.isEmpty()) {
-                    emit appendTools(
-                        "Kein Plan geladen. Bitte zuerst /loadDB oder /plan.",
-                        "error");
+                    emit appendTools("Kein Plan geladen.", "error");
                     emit inputEnabled(true);
                     return;
                 }
                 m_assemble->assembleProject();
                 emit inputEnabled(true);
+                return;
+            }
+            // NEU: /import
+            if (result.prompt.startsWith("__IMPORT__:")) {
+                QString importPath = result.prompt.mid(11);
+                emit appendChat(
+                    QString("<b>Import:</b> %1").arg(importPath.toHtmlEscaped()),
+                    "user");
+                m_chat->handleImport(importPath);
                 return;
             }
             if (result.prompt.isEmpty()) return;
@@ -314,20 +358,19 @@ void Agent::onUserMessage(const QString &text)
 
 void Agent::onStop()
 {
-    ++m_sessionId;           // ungültig macht alle laufenden Callbacks
+    ++m_sessionId;
     m_generating        = false;
-    m_updatingThoughts  = false;  // FIX: Thoughts-Update abbrechen
+    m_updatingThoughts  = false;
     m_continuationCount = 0;
+    m_pendingToolCalls.clear(); // NEU: Queue leeren
+    m_pendingToolIdx = 0;
 
     if (m_worker) m_worker->stopGeneration();
     m_toolFailCount.clear();
 
-    // FIX: Execute-Zustand sauber bereinigen
     if (m_mode == AgentMode::Execute || m_mode == AgentMode::Plan) {
-        // Aktuellen Node als Interrupted markieren (falls vorhanden)
-        if (m_currentNode &&
-            m_currentNode->status == TaskStatus::Running) {
-            m_taskTree.setStatus(m_currentNode, TaskStatus::Pending); // zurück auf Pending
+        if (m_currentNode && m_currentNode->status == TaskStatus::Running) {
+            m_taskTree.setStatus(m_currentNode, TaskStatus::Pending);
             m_taskTree.save();
             emit taskTreeUpdated();
         }
@@ -346,13 +389,13 @@ void Agent::onClearChat()
 {
     ++m_sessionId;
     m_generating        = false;
-    m_updatingThoughts  = false;  // FIX: Thoughts-Update abbrechen
+    m_updatingThoughts  = false;
+    m_pendingToolCalls.clear(); // NEU
+    m_pendingToolIdx = 0;
 
     if (m_worker) m_worker->stopGeneration();
 
-    // FIX: Execute-Zustand sauber bereinigen
-    if (m_currentNode &&
-        m_currentNode->status == TaskStatus::Running) {
+    if (m_currentNode && m_currentNode->status == TaskStatus::Running) {
         m_taskTree.setStatus(m_currentNode, TaskStatus::Pending);
         m_taskTree.save();
     }
@@ -378,23 +421,18 @@ void Agent::onClearChat()
     m_chat->emitStats();
     emit inputEnabled(true);
     emit statusChanged("Bereit");
-    emit taskTreeUpdated();  // Graph aktualisieren (Nodes auf Pending)
+    emit taskTreeUpdated();
 }
 
 void Agent::onFileSavedByUser(const QString &filePath)
 {
     QString name = QFileInfo(filePath).fileName();
-    QString notice = QString(
-        "[System: User hat <b>%1</b> manuell gespeichert. "
-        "Bitte Datei vor weiteren Änderungen neu einlesen.]")
-        .arg(name.toHtmlEscaped());
-    emit appendChat(notice, "system");
+    emit appendChat(
+        QString("[System: User hat <b>%1</b> manuell gespeichert.]")
+        .arg(name.toHtmlEscaped()), "system");
     m_chatModel.addToolResult("editor_notify",
         QString("[User hat '%1' manuell bearbeitet und gespeichert. "
-                "Bitte read_file aufrufen bevor du str_replace oder "
-                "write_file verwendest.]").arg(name));
-    m_logger.logSystem(
-        QString("User hat %1 manuell gespeichert.").arg(filePath));
+                "Bitte read_file aufrufen bevor du str_replace verwendest.]").arg(name));
 }
 
 void Agent::onPlanApproved()
@@ -402,9 +440,7 @@ void Agent::onPlanApproved()
     if (m_mode != AgentMode::Plan) return;
     m_taskTree.save();
     emit appendTools(
-        QString("<b>Plan gespeichert:</b> %1 Knoten in <code>%2</code>")
-        .arg(m_taskTree.nodeCount())
-        .arg(AppConfig::instance().taskDbPath().toHtmlEscaped()),
+        QString("<b>Plan gespeichert:</b> %1 Knoten").arg(m_taskTree.nodeCount()),
         "system");
     m_execute->startExecute();
 }
@@ -415,16 +451,10 @@ void Agent::onPlanRejected()
     m_mode = AgentMode::Chat;
     emit modeChanged(m_mode);
     m_chatModel.setSystemPrompt(buildFullSystemPrompt());
-    emit appendChat(
-        "<b>[System]</b> Plan abgelehnt. Zurück zum Chat-Modus.", "system");
-    emit appendTools("Plan abgelehnt vom User.", "system");
+    emit appendChat("<b>[System]</b> Plan abgelehnt.", "system");
     emit inputEnabled(true);
     emit statusChanged("Bereit");
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-// PRIVATE SLOTS: Worker-Callbacks
-// ═════════════════════════════════════════════════════════════════════════════
 
 void Agent::onModelLoaded()
 {
@@ -433,11 +463,6 @@ void Agent::onModelLoaded()
     emit statusChanged("Modell geladen – bereit");
     emit appendChat(
         "Modell geladen: " + QFileInfo(m_modelPath).fileName(), "system");
-    emit appendTools(
-        "<b>Sampler-Profile:</b><br>"
-        "&nbsp;Chat: Top-K 40 | Temp 0.7 | Top-P 0.95<br>"
-        "&nbsp;Tool: Top-K 20 | Temp 0.1 | Top-P 0.50",
-        "system");
 
     QString toolDebug = "<b>MCP Tools:</b><br>";
     int toolCount = 0;
@@ -484,9 +509,7 @@ void Agent::onTokenReceived(const QString &token)
 }
 
 // ─── onGenerationDone ─────────────────────────────────────────────────────────
-// FIX C: Doppelter Thoughts-Block entfernt.
-// Nur noch ein einziger m_updatingThoughts-Zweig ganz oben.
-// Danach saubere Trennung Plan / Execute / Chat.
+// NEU: format-agnostische Tool-Call-Erkennung via ToolCallFormat::*()
 void Agent::onGenerationDone(const QString &fullResponse)
 {
     m_generating = false;
@@ -494,9 +517,16 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     uint32_t mySession = m_sessionId;
 
-    // ── Thoughts-Update (nach jedem Execute-Node) ─────────────────────────
-    // FIX C: Dieser Block existiert jetzt NUR EINMAL.
-    // parseFromLlmOutput() ist das robuste Parsing (v2).
+    // ── Shortcuts für format-agnostische Prüfungen ────────────────────────
+    // Statt hardcoded "<tool_call>" überall — einmal hier definiert.
+    auto hasToolCall = [&]() {
+        return ToolCallFormat::containsToolCall(fullResponse, m_activeToolFormat);
+    };
+    auto isComplete = [&]() {
+        return ToolCallFormat::isCompleteToolCall(fullResponse, m_activeToolFormat);
+    };
+
+    // ── Thoughts-Update ───────────────────────────────────────────────────
     if (m_updatingThoughts) {
         m_updatingThoughts = false;
         m_executeMemory.parseFromLlmOutput(fullResponse);
@@ -510,26 +540,20 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     // ── Plan-Modus ────────────────────────────────────────────────────────
     if (m_mode == AgentMode::Plan) {
-        if (fullResponse.contains("<plan>") &&
-            fullResponse.contains("</plan>")) {
+        if (fullResponse.contains("<plan>") && fullResponse.contains("</plan>")) {
             m_plan->handlePlanJson(fullResponse, mySession);
             return;
         }
-        if (fullResponse.contains("<tool_call>") &&
-            fullResponse.contains("</tool_call>")) {
+        if (hasToolCall() && isComplete()) {
             m_chatModel.addAssistantMessage(fullResponse);
             m_plan->handlePlanToolCall(fullResponse, mySession);
             return;
         }
-        // Unvollständiger Tool-Call → Continuation
-        if (fullResponse.contains("<tool_call>") &&
-            !fullResponse.contains("</tool_call>")) {
+        if (hasToolCall() && !isComplete()) {
             ++m_continuationCount;
             if (m_continuationCount > MAX_CONTINUATIONS) {
                 m_continuationCount = 0;
-                emit appendTools(
-                    "Plan: Tool-Call unvollständig nach Fortsetzungen — "
-                    "abgebrochen.", "error");
+                emit appendTools("Plan: Tool-Call unvollständig — abgebrochen.", "error");
                 m_mode = AgentMode::Chat;
                 emit modeChanged(m_mode);
                 m_chatModel.setSystemPrompt(buildFullSystemPrompt());
@@ -543,7 +567,6 @@ void Agent::onGenerationDone(const QString &fullResponse)
             startGeneration(LlamaWorker::SamplerProfile::Tool);
             return;
         }
-        // Prosa → weitermachen (Modell denkt noch nach)
         m_chatModel.addAssistantMessage(fullResponse);
         m_generating      = true;
         m_generatedTokens = 0;
@@ -562,14 +585,11 @@ void Agent::onGenerationDone(const QString &fullResponse)
             m_execute->handleExecuteToolCall(fullResponse, mySession);
             return;
         }
-        if (fullResponse.contains("<tool_call>") &&
-            !fullResponse.contains("</tool_call>")) {
+        if (hasToolCall() && !isComplete()) {
             ++m_continuationCount;
             if (m_continuationCount > MAX_CONTINUATIONS) {
                 m_continuationCount = 0;
-                emit appendTools(
-                    "Execute: Tool-Call unvollständig — Node als Failed.",
-                    "error");
+                emit appendTools("Execute: Tool-Call unvollständig — Node als Failed.", "error");
                 if (m_currentNode) {
                     m_taskTree.setStatus(m_currentNode, TaskStatus::Failed);
                     m_taskTree.save();
@@ -595,29 +615,24 @@ void Agent::onGenerationDone(const QString &fullResponse)
         m_chatModel.clear();
         m_chatModel.setSystemPrompt(buildFullSystemPrompt());
         m_chatModel.addUserMessage(
-            QString("[Zusammenfassung der bisherigen Konversation:\n%1]")
-            .arg(fullResponse));
+            QString("[Zusammenfassung:\n%1]").arg(fullResponse));
         m_chatModel.addAssistantMessage(
             "Verstanden. Ich habe die bisherige Konversation im Überblick.");
         emit appendTools(
-            QString("<b>Zusammenfassung erstellt:</b><br>"
-                    "<pre style='font-size:10px'>%1</pre>")
-            .arg(fullResponse.left(500).toHtmlEscaped() +
-                 (fullResponse.length() > 500 ? "..." : "")),
-            "system");
+            QString("<b>Zusammenfassung:</b><br><pre style='font-size:10px'>%1</pre>")
+            .arg(fullResponse.left(500).toHtmlEscaped()), "system");
         emit inputEnabled(true);
-        emit statusChanged("Zusammenfassung fertig — Kontext geleert");
+        emit statusChanged("Zusammenfassung fertig");
         return;
     }
 
-    if (fullResponse.contains("<tool_call>") &&
-        !fullResponse.contains("</tool_call>")) {
+    if (hasToolCall() && !isComplete()) {
         ++m_continuationCount;
         if (m_continuationCount > MAX_CONTINUATIONS) {
             m_continuationCount = 0;
             emit appendTools(
-                QString("Tool-Call nach %1 Fortsetzungen unvollständig — "
-                        "abgebrochen.").arg(MAX_CONTINUATIONS), "error");
+                QString("Tool-Call nach %1 Fortsetzungen unvollständig — abgebrochen.")
+                .arg(MAX_CONTINUATIONS), "error");
             m_chatModel.addAssistantMessage(fullResponse);
             emit inputEnabled(true);
             emit statusChanged("Bereit");
@@ -634,8 +649,7 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     m_continuationCount = 0;
 
-    if (fullResponse.contains("<tool_call>") &&
-        fullResponse.contains("</tool_call>")) {
+    if (hasToolCall() && isComplete()) {
         m_chatModel.addAssistantMessage(fullResponse);
         m_chat->handleToolCall(fullResponse, mySession);
         return;
@@ -647,7 +661,6 @@ void Agent::onGenerationDone(const QString &fullResponse)
     emit statusChanged("Bereit");
 }
 
-// ─── startGeneration ──────────────────────────────────────────────────────────
 void Agent::startGeneration(LlamaWorker::SamplerProfile profile)
 {
     QMetaObject::invokeMethod(m_worker, "generate",

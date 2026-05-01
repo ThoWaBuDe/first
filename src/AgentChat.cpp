@@ -6,57 +6,130 @@
 #include <QJsonObject>
 
 // ─── handleToolCall ───────────────────────────────────────────────────────────
-// Verarbeitet einen Tool-Call im normalen Chat-Modus.
-// Alle Tools erlaubt (keine Whitelist wie Plan/Execute).
-// Nach Tool-Ergebnis: mit Tool-Sampler weiter generieren.
+// NEU: format-agnostisch via ToolCallParser.
+// Unterstützt Mistral-Arrays: mehrere Tool-Calls sequenziell ausführen.
 void AgentChat::handleToolCall(const QString &fullResponse, uint32_t sessionId)
 {
-    int start     = fullResponse.indexOf("<tool_call>") + 11;
-    int end       = fullResponse.indexOf("</tool_call>", start);
-    QString block = fullResponse.mid(start, end - start).trimmed();
+    ToolCallFormat::Preset fmt = m_agent.m_activeToolFormat;
+    QVector<ParsedToolCall> calls = ToolCallParser::parseAll(fullResponse, fmt);
 
-    QJsonParseError pe;
-    QJsonDocument doc = QJsonDocument::fromJson(block.toUtf8(), &pe);
-
-    if (doc.isNull()) {
+    if (calls.isEmpty()) {
         emit m_agent.appendTools(
-            QString("<b>JSON-Fehler:</b> %1<br><pre>%2</pre>")
-            .arg(pe.errorString().toHtmlEscaped(), block.toHtmlEscaped()), "error");
+            QString("<b>Tool-Call:</b> Kein gültiger Call im Format '%1' gefunden.")
+            .arg(ToolCallFormat::presetName(fmt).toHtmlEscaped()), "error");
+        m_agent.m_chatModel.addToolResult("parse_error",
+            QString("[SYSTEM: Kein Tool-Call im Format '%1' gefunden. "
+                    "Bitte erneut senden.]")
+            .arg(ToolCallFormat::presetName(fmt)));
+        m_agent.m_generating      = true;
+        m_agent.m_generatedTokens = 0;
+        m_agent.m_currentResponse.clear();
+        m_agent.m_thinkBuffer.clear();
+        m_agent.m_inThinkBlock = false;
+        emit m_agent.appendChat("<b>Assistent:</b> ", "assistant");
+        m_agent.startGeneration(LlamaWorker::SamplerProfile::Tool);
+        return;
+    }
 
-        QString repaired = AgentUtils::repairJson(block);
-        if (!repaired.isEmpty()) {
-            doc = QJsonDocument::fromJson(repaired.toUtf8());
+    // JSON-Fehler in einzelnen Calls abfangen
+    for (const ParsedToolCall &call : calls) {
+        if (!call.valid) {
             emit m_agent.appendTools(
-                QString("<b>JSON repariert:</b><br><pre>%1</pre>")
-                .arg(repaired.toHtmlEscaped()), "tool");
-        } else {
-            QString errFeedback = QString(
-                "[SYSTEM: Dein Tool-Call enthielt ungültiges JSON. Fehler: %1. "
-                "Bitte sende den Tool-Call erneut mit korrektem JSON.]")
-                .arg(pe.errorString());
-            m_agent.m_chatModel.addToolResult("json_error", errFeedback);
+                QString("<b>JSON-Fehler:</b> %1").arg(call.error.toHtmlEscaped()),
+                "error");
+
+            // Repair-Versuch (nur für XML-Format sinnvoll)
+            if (fmt == ToolCallFormat::Preset::QwenXmlTags ||
+                fmt == ToolCallFormat::Preset::Generic) {
+                int start = fullResponse.indexOf("<tool_call>") + 11;
+                int end   = fullResponse.indexOf("</tool_call>", start);
+                if (start > 10 && end > start) {
+                    QString block = fullResponse.mid(start, end - start).trimmed();
+                    QString repaired = AgentUtils::repairJson(block);
+                    if (!repaired.isEmpty()) {
+                        QJsonDocument doc = QJsonDocument::fromJson(repaired.toUtf8());
+                        if (!doc.isNull()) {
+                            emit m_agent.appendTools("<b>JSON repariert.</b>", "tool");
+                            executeToolCall(
+                                ParsedToolCall::ok(
+                                    doc.object().value("name").toString(),
+                                    doc.object().value("arguments").toObject()),
+                                {}, sessionId);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            m_agent.m_chatModel.addToolResult("json_error",
+                QString("[SYSTEM: Ungültiges JSON. Fehler: %1. "
+                        "Bitte korrektes JSON verwenden.]").arg(call.error));
             m_agent.m_generating      = true;
             m_agent.m_generatedTokens = 0;
             m_agent.m_currentResponse.clear();
             m_agent.m_thinkBuffer.clear();
             m_agent.m_inThinkBlock = false;
             emit m_agent.appendChat("<b>Assistent:</b> ", "assistant");
-            emit m_agent.statusChanged("JSON-Fehler — nochmal...");
             m_agent.startGeneration(LlamaWorker::SamplerProfile::Tool);
             return;
         }
     }
 
-    QString     toolName = doc.object().value("name").toString();
-    QJsonObject toolArgs = doc.object().value("arguments").toObject();
+    // Sequenzielle Ausführung
+    if (calls.size() == 1) {
+        executeToolCall(calls.first(), {}, sessionId);
+    } else {
+        emit m_agent.appendTools(
+            QString("<b>Tool-Array (%1 Calls):</b> sequenziell ausführen.")
+            .arg(calls.size()), "system");
+        m_agent.m_pendingToolCalls = calls;
+        m_agent.m_pendingToolIdx   = 0;
+        executeNextPendingCall(sessionId);
+    }
+}
+
+// ─── executeNextPendingCall ───────────────────────────────────────────────────
+void AgentChat::executeNextPendingCall(uint32_t sessionId)
+{
+    if (m_agent.m_pendingToolIdx >= m_agent.m_pendingToolCalls.size()) {
+        m_agent.m_pendingToolCalls.clear();
+        m_agent.m_pendingToolIdx = 0;
+        m_agent.m_generating      = true;
+        m_agent.m_generatedTokens = 0;
+        m_agent.m_currentResponse.clear();
+        m_agent.m_thinkBuffer.clear();
+        m_agent.m_inThinkBlock = false;
+        emit m_agent.appendChat("<b>Assistent:</b> ", "assistant");
+        emit m_agent.statusChanged("Alle Tool-Calls abgeschlossen...");
+        m_agent.startGeneration(LlamaWorker::SamplerProfile::Tool);
+        return;
+    }
+
+    const ParsedToolCall &call = m_agent.m_pendingToolCalls[m_agent.m_pendingToolIdx];
+    ++m_agent.m_pendingToolIdx;
+
+    int remaining = m_agent.m_pendingToolCalls.size() - m_agent.m_pendingToolIdx;
+    executeToolCall(call,
+        remaining > 0 ? QString(" [%1 weitere]").arg(remaining) : QString(),
+        sessionId);
+}
+
+// ─── executeToolCall ──────────────────────────────────────────────────────────
+void AgentChat::executeToolCall(const ParsedToolCall &call,
+                                 const QString &queueSuffix,
+                                 uint32_t sessionId)
+{
+    const QString &toolName   = call.name;
+    const QJsonObject &toolArgs = call.arguments;
 
     m_agent.m_logger.logToolCall(toolName,
         QString::fromUtf8(QJsonDocument(toolArgs).toJson(QJsonDocument::Indented)));
 
     emit m_agent.appendTools(
-        QString("<b>Tool-Call: %1</b><br><pre>%2</pre>")
-        .arg(toolName.toHtmlEscaped(),
-             QString::fromUtf8(QJsonDocument(toolArgs)
+        QString("<b>Tool-Call: %1</b>%2<br><pre>%3</pre>")
+        .arg(toolName.toHtmlEscaped())
+        .arg(queueSuffix.toHtmlEscaped())
+        .arg(QString::fromUtf8(QJsonDocument(toolArgs)
                                .toJson(QJsonDocument::Indented)).toHtmlEscaped()),
         "tool");
 
@@ -64,9 +137,13 @@ void AgentChat::handleToolCall(const QString &fullResponse, uint32_t sessionId)
         QString errMsg = QString("Fehler: Unbekanntes Tool '%1'.").arg(toolName);
         emit m_agent.appendTools(errMsg, "error");
         m_agent.m_chatModel.addToolResult(toolName, errMsg);
-        m_agent.m_generating      = true;
-        m_agent.m_generatedTokens = 0;
-        m_agent.startGeneration(LlamaWorker::SamplerProfile::Tool);
+        if (!m_agent.m_pendingToolCalls.isEmpty()) {
+            executeNextPendingCall(sessionId);
+        } else {
+            m_agent.m_generating      = true;
+            m_agent.m_generatedTokens = 0;
+            m_agent.startGeneration(LlamaWorker::SamplerProfile::Tool);
+        }
         return;
     }
 
@@ -80,13 +157,12 @@ void AgentChat::handleToolCall(const QString &fullResponse, uint32_t sessionId)
             QString toolResult = error.isEmpty() ? result : ("Fehler: " + error);
             bool    isErr      = !error.isEmpty();
 
-            // Token-Budget: lange Ergebnisse kürzen
             if (!isErr && toolResult.length() > AppConfig::instance().maxToolResultChars()) {
                 int maxChars = AppConfig::instance().maxToolResultChars();
                 int cut = toolResult.lastIndexOf('\n', maxChars);
                 if (cut < maxChars / 2) cut = maxChars;
                 toolResult = toolResult.left(cut)
-                    + QString("\n\n[... gekürzt: %1 von %2 Zeichen angezeigt.]")
+                    + QString("\n\n[... gekürzt: %1 von %2 Zeichen.]")
                       .arg(cut).arg(result.length());
             }
 
@@ -100,6 +176,8 @@ void AgentChat::handleToolCall(const QString &fullResponse, uint32_t sessionId)
                     m_agent.m_chatModel.addToolResult(toolName,
                         AgentUtils::deadlockEscalationPrompt(toolName, failCount));
                     m_agent.m_toolFailCount.remove(tKey);
+                    m_agent.m_pendingToolCalls.clear();
+                    m_agent.m_pendingToolIdx = 0;
                     m_agent.m_generating      = true;
                     m_agent.m_generatedTokens = 0;
                     m_agent.m_currentResponse.clear();
@@ -113,7 +191,7 @@ void AgentChat::handleToolCall(const QString &fullResponse, uint32_t sessionId)
                 if (failCount == AgentUtils::DEADLOCK_WARN ||
                     failCount == AgentUtils::DEADLOCK_REDIRECT) {
                     emit m_agent.appendTools(
-                        QString("<b>Deadlock-Warnung (Stufe %1):</b> '%2' fehlgeschlagen.")
+                        QString("<b>Deadlock-Warnung (Stufe %1):</b> '%2'")
                         .arg(failCount).arg(toolName.toHtmlEscaped()), "error");
                     toolResult += "\n\n" +
                         AgentUtils::deadlockEscalationPrompt(toolName, failCount);
@@ -129,32 +207,26 @@ void AgentChat::handleToolCall(const QString &fullResponse, uint32_t sessionId)
 
             m_agent.m_logger.logToolResult(toolName, toolResult, isErr);
 
-            // Git-Diff nach Schreib-Tools anzeigen
+            // Git-Diff nach Schreib-Tools
             static const QStringList fileWriteTools =
                 {"str_replace", "write_file", "append_file"};
             if (!isErr && fileWriteTools.contains(toolName)) {
                 QJsonObject diffArgs;
-                diffArgs["stat_only"] = false;
                 m_agent.m_mcp.callTool("git_diff", diffArgs,
                     [this, sessionId](QString diffResult, QString diffError) {
                         if (sessionId != m_agent.m_sessionId) return;
                         if (!diffError.isEmpty() || diffResult.isEmpty()) return;
-                        QString html = "<b>Git Diff:</b><br>"
-                                       "<pre style='font-size:10px'>";
+                        QString html = "<b>Git Diff:</b><br><pre style='font-size:10px'>";
                         for (const QString &line : diffResult.split('\n')) {
                             QString esc = line.toHtmlEscaped();
                             if (line.startsWith('+') && !line.startsWith("+++"))
-                                html += QString("<span style='color:#188038;"
-                                        "background:#e6f4ea'>%1</span>\n").arg(esc);
+                                html += QString("<span style='color:#188038;background:#e6f4ea'>%1</span>\n").arg(esc);
                             else if (line.startsWith('-') && !line.startsWith("---"))
-                                html += QString("<span style='color:#c5221f;"
-                                        "background:#fce8e6'>%1</span>\n").arg(esc);
+                                html += QString("<span style='color:#c5221f;background:#fce8e6'>%1</span>\n").arg(esc);
                             else if (line.startsWith("@@"))
-                                html += QString("<span style='color:#1a73e8'>"
-                                        "%1</span>\n").arg(esc);
+                                html += QString("<span style='color:#1a73e8'>%1</span>\n").arg(esc);
                             else
-                                html += QString("<span style='color:#666'>"
-                                        "%1</span>\n").arg(esc);
+                                html += QString("<span style='color:#666'>%1</span>\n").arg(esc);
                         }
                         html += "</pre>";
                         emit m_agent.appendTools(html, "tool");
@@ -162,32 +234,27 @@ void AgentChat::handleToolCall(const QString &fullResponse, uint32_t sessionId)
             }
 
             m_agent.m_chatModel.addToolResult(toolName, toolResult);
-            m_agent.m_generating      = true;
-            m_agent.m_generatedTokens = 0;
-            m_agent.m_currentResponse.clear();
-            m_agent.m_thinkBuffer.clear();
-            m_agent.m_inThinkBlock = false;
-            emit m_agent.appendChat("<b>Assistent:</b> ", "assistant");
-            emit m_agent.statusChanged("Tool-Ergebnis verarbeiten...");
-            m_agent.startGeneration(LlamaWorker::SamplerProfile::Tool);
+
+            // Bei Array: nächsten Call oder Generation starten
+            if (!m_agent.m_pendingToolCalls.isEmpty() &&
+                m_agent.m_pendingToolIdx < m_agent.m_pendingToolCalls.size()) {
+                executeNextPendingCall(sessionId);
+            } else {
+                m_agent.m_pendingToolCalls.clear();
+                m_agent.m_pendingToolIdx = 0;
+                m_agent.m_generating      = true;
+                m_agent.m_generatedTokens = 0;
+                m_agent.m_currentResponse.clear();
+                m_agent.m_thinkBuffer.clear();
+                m_agent.m_inThinkBlock = false;
+                emit m_agent.appendChat("<b>Assistent:</b> ", "assistant");
+                emit m_agent.statusChanged("Tool-Ergebnis verarbeiten...");
+                m_agent.startGeneration(LlamaWorker::SamplerProfile::Tool);
+            }
         });
 }
 
 // ─── filterToken ─────────────────────────────────────────────────────────────
-// Zustandsautomat für <think>-Block-Erkennung.
-//
-// Zustand 0 (m_inThinkBlock = false):
-//   Tokens akkumulieren bis <think> erkannt wird.
-//   Alles vor <think> → chatView.
-//   <think> → Zustand 1 wechseln.
-//
-// Zustand 1 (m_inThinkBlock = true):
-//   Tokens akkumulieren bis </think> erkannt wird.
-//   Thinking-Text → toolView (komprimiert).
-//   </think> → Zustand 0 wechseln.
-//
-// MAX_TAG_LEN: Puffer-Fenster in dem wir auf Tag-Anfang warten.
-// Größer als der längste Tag ("</think>" = 8 Zeichen) + Sicherheit.
 void AgentChat::filterToken(const QString &token)
 {
     static constexpr int MAX_TAG_LEN = 12;
@@ -196,26 +263,21 @@ void AgentChat::filterToken(const QString &token)
         m_agent.m_thinkBuffer += token;
 
         if (m_agent.m_thinkBuffer.endsWith("<think>")) {
-            // <think> gefunden: alles davor ausgeben, Think-Modus aktivieren
             QString before = m_agent.m_thinkBuffer;
             before.chop(7);
             if (!before.isEmpty()) emit m_agent.appendChatToken(before);
             m_agent.m_inThinkBlock = true;
             m_agent.m_thinkBuffer.clear();
-
         } else if (m_agent.m_thinkBuffer.length() > MAX_TAG_LEN ||
                    !QString("<think>").startsWith(
                        m_agent.m_thinkBuffer.right(MAX_TAG_LEN))) {
-            // Kein Tag-Anfang im Puffer → direkt ausgeben
             emit m_agent.appendChatToken(m_agent.m_thinkBuffer);
             m_agent.m_thinkBuffer.clear();
         }
-
     } else {
         m_agent.m_thinkBuffer += token;
 
         if (m_agent.m_thinkBuffer.endsWith("</think>")) {
-            // </think> gefunden: Thinking-Text in toolView, Think-Modus deaktivieren
             QString thinkText = m_agent.m_thinkBuffer;
             thinkText.chop(8);
             emit m_agent.appendTools(
@@ -230,19 +292,11 @@ void AgentChat::filterToken(const QString &token)
 }
 
 // ─── summarizeContext ─────────────────────────────────────────────────────────
-// Fasst die bisherige Konversation zusammen um Kontext freizumachen.
-// Nach der Zusammenfassung: ChatModel geleert, Zusammenfassung als erste Nachricht.
-//
-// Warum ChatModel leeren statt alten Nachrichten löschen?
-//   Einzelne Nachrichten zu löschen würde den Gesprächsfaden zerreißen.
-//   Eine kompakte Zusammenfassung als "User"-Nachricht gibt dem Modell
-//   einen kohärenten Ausgangspunkt.
 void AgentChat::summarizeContext()
 {
     if (m_agent.m_summarizing) return;
     m_agent.m_summarizing = true;
 
-    // Gesprächshistorie als Text aufbauen
     QString history;
     for (const auto &msg : m_agent.m_chatModel.messages()) {
         switch (msg.role) {
@@ -258,9 +312,8 @@ void AgentChat::summarizeContext()
 
     QString summarizePrompt = QString(
         "Fasse die folgende Konversation in maximal 300 Wörtern zusammen. "
-        "Behalte alle wichtigen Fakten, getroffenen Entscheidungen, "
-        "Dateipfade, Fehlermeldungen und offene Aufgaben. "
-        "Schreibe nur die Zusammenfassung, keine Einleitung.\n\n"
+        "Behalte alle wichtigen Fakten, Dateipfade, Fehler und offene Aufgaben. "
+        "Schreibe nur die Zusammenfassung.\n\n"
         "--- Konversation ---\n%1\n--- Ende ---"
     ).arg(history.left(12000));
 
@@ -295,4 +348,70 @@ void AgentChat::checkContextUsage()
             .arg(pct), "system");
         summarizeContext();
     }
+}
+
+// ─── handleImport (NEU) ───────────────────────────────────────────────────────
+// Importiert Quellcode in den Node-Baum.
+// Nutzt Plan-Modus: das Modell liest den Code mit tree-sitter-Tools
+// und baut H2/H3-Nodes mit echtem Code im result-Feld.
+void AgentChat::handleImport(const QString &path)
+{
+    emit m_agent.appendTools(
+        QString("<b>Import gestartet:</b> <code>%1</code><br>"
+                "<small>tree-sitter analysiert → Nodes mit echtem Code</small>")
+        .arg(path.toHtmlEscaped()), "system");
+    emit m_agent.statusChanged("Import läuft...");
+
+    QString importSystemPrompt = QString(
+        "Du bist ein Code-Analyse-Agent.\n"
+        "\n"
+        "AUFGABE: Importiere den Quellcode unter '%1' in den Node-Baum.\n"
+        "\n"
+        "VORGEHEN:\n"
+        "1. Erkunde die Struktur mit list_dir oder find_files\n"
+        "2. Pro Datei: lies Symbole mit list_symbols\n"
+        "3. Pro Datei: H2-Node erstellen (title = Dateiname, symbol = Klassenname)\n"
+        "4. Pro Methode: H3-Node mit get_function_body den Code holen\n"
+        "   → result-Feld = der vollständige Methoden-Code\n"
+        "5. Erkenne Abhängigkeiten (wer nutzt wen) → set_depends_on\n"
+        "6. Mit plan_done abschließen\n"
+        "\n"
+        "WICHTIG:\n"
+        "  H3 result-Feld MUSS den echten Code enthalten (get_function_body)\n"
+        "  H3 title = Methodenname ('Timer::start()'), NICHT Dateiname\n"
+        "  H3 symbol = vollqualifizierter Name ('Timer::start()')\n"
+        "\n"
+        "TOOLS: list_dir, find_files, list_symbols, get_function_body,\n"
+        "       read_file, get_class_members\n"
+        "PLAN-TOOLS: create_node, set_depends_on, get_nodes, plan_done\n"
+        "\n"
+        "Antworte auf Deutsch. Erkläre kurz jeden Schritt.\n"
+    ).arg(path);
+
+    // In Plan-Modus wechseln — die internen Plan-Tools sind dort verfügbar
+    m_agent.m_mode = AgentMode::Plan;
+    emit m_agent.modeChanged(m_agent.m_mode);
+    m_agent.m_taskTree.clear();
+    m_agent.m_planRetryCount    = 0;
+    m_agent.m_continuationCount = 0;
+
+    m_agent.m_chatModel.clear();
+    m_agent.m_chatModel.setSystemPrompt(importSystemPrompt);
+    m_agent.m_chatModel.addUserMessage(
+        QString("Importiere den Code unter '%1'.\n\n"
+                "Beginne mit der Erkundung der Verzeichnisstruktur.\n"
+                "Dann list_symbols pro Datei.\n"
+                "Dann get_function_body für jede Methode → result-Feld befüllen.\n"
+                "H3-Nodes müssen den echten Code enthalten — das ist der Kern des Imports.")
+        .arg(path));
+
+    m_agent.m_currentResponse.clear();
+    m_agent.m_thinkBuffer.clear();
+    m_agent.m_inThinkBlock    = false;
+    m_agent.m_generatedTokens = 0;
+    m_agent.m_generating      = true;
+
+    emit m_agent.appendChat("<b>Assistent (Import):</b> ", "assistant");
+    emit m_agent.inputEnabled(false);
+    m_agent.startGeneration(LlamaWorker::SamplerProfile::Chat);
 }

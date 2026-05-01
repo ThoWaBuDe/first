@@ -1,25 +1,4 @@
 #pragma once
-// ─── Agent ───────────────────────────────────────────────────────────────────
-// Herzstück — Koordination und Zustandshaltung.
-// Delegiert Fachlogik an Teilklassen:
-//
-//   AgentChat    — Chat-Modus (Tool-Calls, filterToken, summarize)
-//   AgentPlan    — Plan-Modus (startPlan, handlePlanJson, parsePlanNode)
-//   AgentExecute — Execute-Modus (advanceExecute, buildExecutePrompt)
-//   AgentAssemble— Assembly (Nodes → Dateien)
-//   AgentUtils   — Statische Hilfsfunktionen (repairJson, toolCallKey, ...)
-//
-// Pattern: Komposition + friend.
-//   Die Teilklassen erhalten im Konstruktor eine Referenz auf Agent
-//   und greifen über friend auf dessen private Member zu.
-//   Agent selbst hat keinerlei Implementierungslogik mehr — nur Koordination.
-//
-// Threading:
-//   Agent lebt im GUI-Thread.
-//   LlamaWorker lebt im Worker-Thread.
-//   Kommunikation: Qt Signals/Slots mit QueuedConnection.
-//   Generation Stamp (m_sessionId) verhindert veraltete Callbacks.
-
 #include <QObject>
 #include <QThread>
 #include <QHash>
@@ -32,11 +11,11 @@
 #include "ChatLogger.h"
 #include "AppConfig.h"
 #include "ChatTemplate.h"
+#include "ToolCallFormat.h"
 #include "TaskTree.h"
 #include "ExecuteMemory.h"
 #include "CodeAssembler.h"
 
-// Forward-Declarations der Teilklassen
 class AgentChat;
 class AgentPlan;
 class AgentExecute;
@@ -47,9 +26,6 @@ enum class AgentMode { Chat, Plan, Execute };
 class Agent : public QObject {
     Q_OBJECT
 
-    // Teilklassen als friends — sie greifen direkt auf private Member zu.
-    // Das ist bewusst gewählt: Kapselung gegenüber dem Rest der Welt
-    // bleibt erhalten, aber interne Logik kann ausgelagert werden.
     friend class AgentChat;
     friend class AgentPlan;
     friend class AgentExecute;
@@ -66,11 +42,12 @@ public:
     const ExecuteMemory &executeMemory() const { return m_executeMemory; }
     AgentMode mode() const { return m_mode; }
 
-    // Whitelists (public damit Teilklassen sie ohne friend nutzen können)
+    // NEU: aktives Tool-Call-Format (für AgentChat/Execute/Plan)
+    ToolCallFormat::Preset activeToolFormat() const { return m_activeToolFormat; }
+
     static const QStringList PLAN_ALLOWED_TOOLS;
     static const QStringList EXECUTE_ALLOWED_TOOLS;
 
-    // Konstanten (public für Teilklassen)
     static constexpr int MAX_CONTINUATIONS = 3;
     static constexpr int MAX_PLAN_RETRIES  = 1;
 
@@ -105,14 +82,15 @@ private slots:
     void onError(const QString &error);
     void onChatTemplateDetected(const QString &jinjaTemplate,
                                  ChatTemplate::Preset detectedPreset);
+    // NEU: Tool-Call-Format nach Modell-Load
+    void onToolFormatDetected(ToolCallFormat::Preset detectedFormat,
+                               const QString &source);
 
 private:
-    // ── Interne Hilfsmethoden (genutzt von Teilklassen) ──────────────────
     void startGeneration(LlamaWorker::SamplerProfile profile);
     QString buildFullSystemPrompt() const;
     void    applyChatTemplate();
 
-    // ── Private Member (zugänglich für friend-Klassen) ────────────────────
     QString           m_modelPath;
     ChatModel         m_chatModel;
     McpManager        m_mcp;
@@ -129,13 +107,21 @@ private:
     TaskNode     *m_currentNode = nullptr;
     bool          m_updatingThoughts = false;
 
-    // Teilklassen (Aggregation — Agent besitzt sie)
     AgentChat    *m_chat     = nullptr;
     AgentPlan    *m_plan     = nullptr;
     AgentExecute *m_execute  = nullptr;
     AgentAssemble*m_assemble = nullptr;
 
-    // Generierungs-Zustand
+    // NEU: aktives Tool-Call-Format
+    // Wird von onToolFormatDetected() gesetzt (Auto-Detection oder User-Wahl)
+    ToolCallFormat::Preset m_activeToolFormat = ToolCallFormat::Preset::QwenXmlTags;
+
+    // NEU: Queue für Mistral-Array-Tool-Calls
+    // Mehrere Tool-Calls werden sequenziell ausgeführt.
+    // AgentChat::executeNextPendingCall() arbeitet die Queue ab.
+    QVector<ParsedToolCall> m_pendingToolCalls;
+    int                     m_pendingToolIdx = 0;
+
     uint32_t m_sessionId         = 0;
     bool     m_generating        = false;
     QString  m_currentResponse;
@@ -143,21 +129,16 @@ private:
     bool     m_inThinkBlock      = false;
     int      m_continuationCount = 0;
 
-    // Plan-Zustand
     int m_planRetryCount = 0;
 
-    // Deadlock-Erkennung
     QHash<QString, int> m_toolFailCount;
 
-    // Kontext-Management
     bool m_summarizing = false;
 
-    // Token-Statistiken
     int m_generatedTokens = 0;
     int m_totalTokens     = 0;
     int m_promptTokens    = 0;
     int m_ctxSize         = 0;
 
-    // Chat-Template
     ChatTemplate::Preset m_detectedPreset = ChatTemplate::Preset::ChatML;
 };

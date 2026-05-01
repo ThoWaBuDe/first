@@ -17,8 +17,6 @@
 #define AS_CTX(p)     reinterpret_cast<llama_context*>(p)
 #define AS_SAMPLER(p) reinterpret_cast<llama_sampler*>(p)
 
-// ─── randomSeed ──────────────────────────────────────────────────────────────
-// /dev/urandom — blockiert nie, ausreichend für Sampler-Seed.
 static uint32_t randomSeed()
 {
     uint32_t seed = 0;
@@ -41,8 +39,6 @@ void LlamaWorker::cleanup()
     if (m_model)          { llama_model_free(AS_MODEL(m_model));              m_model          = nullptr; }
 }
 
-// ─── buildChatSampler ────────────────────────────────────────────────────────
-// Chat: kreativ — top_k=40, temp=0.7
 void *LlamaWorker::buildChatSampler()
 {
     const AppConfig &cfg = AppConfig::instance();
@@ -52,14 +48,10 @@ void *LlamaWorker::buildChatSampler()
     llama_sampler_chain_add(chain, llama_sampler_init_temp(cfg.chatTemp()));
     llama_sampler_chain_add(chain, llama_sampler_init_top_p(cfg.chatTopP(), 1));
     llama_sampler_chain_add(chain, llama_sampler_init_min_p(cfg.chatMinP(), 1));
-    llama_sampler_chain_add(chain, llama_sampler_init_dist(0)); // Seed → refreshDistSampler()
+    llama_sampler_chain_add(chain, llama_sampler_init_dist(0));
     return chain;
 }
 
-// ─── buildExecuteSampler (NEU — Punkt I) ─────────────────────────────────────
-// Execute: Code-Generierung — top_k=20, temp=0.2
-// Zwischen Chat (kreativ) und Tool (deterministisch).
-// Konfigurierbar über AppConfig::SamplerExecute-Gruppe.
 void *LlamaWorker::buildExecuteSampler()
 {
     const AppConfig &cfg = AppConfig::instance();
@@ -73,8 +65,6 @@ void *LlamaWorker::buildExecuteSampler()
     return chain;
 }
 
-// ─── buildToolSampler ────────────────────────────────────────────────────────
-// Tool: deterministisch — top_k=20, temp=0.1
 void *LlamaWorker::buildToolSampler()
 {
     const AppConfig &cfg = AppConfig::instance();
@@ -88,9 +78,6 @@ void *LlamaWorker::buildToolSampler()
     return chain;
 }
 
-// ─── refreshDistSampler ──────────────────────────────────────────────────────
-// Tauscht Dist-Sampler (letzter in der Kette, Index 4) gegen neuen mit Seed.
-// Analogie AVR: Timer-Reload-Register — nur Startwert neu, Hardware läuft weiter.
 void LlamaWorker::refreshDistSampler(void *chain)
 {
     llama_sampler *old = llama_sampler_chain_remove(AS_SAMPLER(chain), 4);
@@ -99,8 +86,6 @@ void LlamaWorker::refreshDistSampler(void *chain)
                             llama_sampler_init_dist(randomSeed()));
 }
 
-// ─── rebuildSamplers ─────────────────────────────────────────────────────────
-// Alle drei Sampler neu bauen — nach Einstellungsänderung.
 void LlamaWorker::rebuildSamplers()
 {
     if (m_samplerChat)    { llama_sampler_free(AS_SAMPLER(m_samplerChat));    m_samplerChat    = nullptr; }
@@ -114,10 +99,11 @@ void LlamaWorker::rebuildSamplers()
     emit samplersRebuilt();
 }
 
-// ─── initialize ──────────────────────────────────────────────────────────────
 void LlamaWorker::initialize(const QString &modelPath)
 {
     cleanup();
+    m_modelPath = modelPath; // NEU: für Fallback-Detection speichern
+
     llama_backend_init();
 
     llama_model_params modelParams = llama_model_default_params();
@@ -151,15 +137,39 @@ void LlamaWorker::initialize(const QString &modelPath)
     m_sampler        = m_samplerChat;
     m_initialized    = true;
 
+    // ── Chat-Template Detection ───────────────────────────────────────────
     const char *rawTmpl = llama_model_chat_template(AS_MODEL(m_model), nullptr);
     QString jinjaTemplate = rawTmpl ? QString::fromUtf8(rawTmpl) : QString();
     m_detectedPreset = ChatTemplate::detectFromJinja(jinjaTemplate);
-
     emit chatTemplateDetected(jinjaTemplate, m_detectedPreset);
+
+    // ── Tool-Call-Format Detection (NEU) ──────────────────────────────────
+    // Zwei Erkennungsebenen:
+    //   1. Jinja-Template (genauer — enthält Tool-Call-Marker)
+    //   2. Modell-Dateiname (Fallback wenn Template keinen Hinweis hat)
+    // Analogie AVR: zwei Sensoren — der genauere hat Vorrang.
+    ToolCallFormat::Preset toolPreset =
+        ToolCallFormat::detectFromJinja(jinjaTemplate);
+
+    QString toolSource;
+    if (toolPreset == ToolCallFormat::Preset::Auto) {
+        // Jinja gibt keinen Hinweis → Modellname prüfen
+        toolPreset  = ToolCallFormat::detectFromModelName(modelPath);
+        toolSource  = "Modellname";
+    } else {
+        toolSource  = "GGUF-Template";
+    }
+
+    // Generic als letzter Fallback wenn auch Modellname nicht hilft
+    if (toolPreset == ToolCallFormat::Preset::Auto)
+        toolPreset = ToolCallFormat::Preset::Generic;
+
+    m_detectedToolFormat = toolPreset;
+    emit toolCallFormatDetected(toolPreset, toolSource);
+
     emit modelLoaded();
 }
 
-// ─── roleToStr ───────────────────────────────────────────────────────────────
 const char *LlamaWorker::roleToStr(ChatMessage::Role role)
 {
     switch (role) {
@@ -171,7 +181,6 @@ const char *LlamaWorker::roleToStr(ChatMessage::Role role)
     return "user";
 }
 
-// ─── applyTemplate ───────────────────────────────────────────────────────────
 QString LlamaWorker::applyTemplate(const QVector<ChatMessage> &messages) const
 {
     if (!m_model) return {};
@@ -211,9 +220,7 @@ QString LlamaWorker::applyTemplate(const QVector<ChatMessage> &messages) const
             return QString::fromUtf8(buf.data(), result);
     }
 
-    qWarning() << "LlamaWorker: llama_chat_apply_template fehlgeschlagen,"
-               << "Fallback auf Preset:"
-               << ChatTemplate::presetName(m_detectedPreset);
+    qWarning() << "LlamaWorker: llama_chat_apply_template fehlgeschlagen, Fallback";
 
     ChatModel fallbackModel;
     fallbackModel.setChatTemplate(ChatTemplate::forPreset(m_detectedPreset));
@@ -232,10 +239,6 @@ QString LlamaWorker::applyTemplate(const QVector<ChatMessage> &messages) const
     return fallbackModel.buildPrompt();
 }
 
-// ─── doGenerate ──────────────────────────────────────────────────────────────
-// Gemeinsamer Kern für generate() und generateDelta().
-// clearCache=true → KV-Cache leeren (bisheriges Verhalten).
-// clearCache=false → Delta-Encoding Vorbereitung (TODO: n_past).
 void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
                               SamplerProfile profile,
                               bool clearCache)
@@ -246,14 +249,12 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
     }
     m_stopFlag.store(false);
 
-    // ── Sampler-Profil wählen (NEU: Execute) ─────────────────────────────
     switch (profile) {
         case SamplerProfile::Execute: m_sampler = m_samplerExecute; break;
         case SamplerProfile::Tool:    m_sampler = m_samplerTool;    break;
         default:                      m_sampler = m_samplerChat;    break;
     }
 
-    // Frischer Seed vor jeder Generation → kein deterministischer Loop
     refreshDistSampler(m_sampler);
 
     QString promptQStr = applyTemplate(messages);
@@ -323,8 +324,14 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
     }
 
     // ── Token-Sampling-Loop ───────────────────────────────────────────────
-    static const QString TOOL_STOP = "</tool_call>";
+    // NEU: Stop-Sequenz ist format-abhängig
+    // effectiveToolCallFormat() gibt das aktuell aktive Format zurück.
+    // Analogie AVR: UART stoppt beim konfigurierten ETX-Byte, nicht hardcoded.
+    AppConfig &cfg = AppConfig::instance();
+    ToolCallFormat::Preset fmt = cfg.effectiveToolCallFormat();
+    QString toolStop = ToolCallFormat::stopSequence(fmt);
     static const QString CODE_STOP = "</code>";
+
     QString fullResponse;
     const int maxNewTokens = 8192;
 
@@ -339,15 +346,14 @@ void LlamaWorker::doGenerate(const QVector<ChatMessage> &messages,
         fullResponse += tokenStr;
         emit tokenGenerated(tokenStr);
 
-        // Tool-Calls früh stoppen
-        if ((profile == SamplerProfile::Tool ||
+        // Format-abhängiger früher Stop bei Tool-Calls
+        if (!toolStop.isEmpty() &&
+            (profile == SamplerProfile::Tool ||
              profile == SamplerProfile::Execute) &&
-            fullResponse.endsWith(TOOL_STOP))
+            fullResponse.endsWith(toolStop))
             break;
 
-        // FIX: Execute-Modus stoppt sobald </code> vollständig im Response.
-        // Das verhindert den Halluzinations-Loop nach dem Code-Block.
-        // Analogie AVR: UART-Empfang stoppt bei ETX-Byte, nicht erst bei Puffer-Ende.
+        // Execute: nach </code> stoppen
         if (profile == SamplerProfile::Execute &&
             fullResponse.contains(CODE_STOP))
             break;

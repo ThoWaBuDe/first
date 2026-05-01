@@ -39,12 +39,13 @@ CommandProcessor::ProcessResult CommandProcessor::process(const QString &text,
     if (cmd == "compile")   return handleCompile(args);
     if (cmd == "run")       return handleRun(args);
     if (cmd == "plan")      return handlePlan(args);
-    if (cmd == "execute")   return handleExecute(args);    // NEU
-    if (cmd == "savedb")    return handleSaveDB(args);     // NEU
-    if (cmd == "loaddb")    return handleLoadDB(args);     // NEU
+    if (cmd == "execute")   return handleExecute(args);
+    if (cmd == "savedb")    return handleSaveDB(args);
+    if (cmd == "loaddb")    return handleLoadDB(args);
     if (cmd == "summarize") return handleSummarize(args);
     if (cmd == "undo")      return handleUndo(args);
     if (cmd == "diff")      return handleDiff(args);
+    if (cmd == "import")    return handleImport(args); // NEU
 
     ProcessResult r;
     r.handled        = true;
@@ -62,23 +63,40 @@ QString CommandProcessor::helpText()
         "  /compile             — nur make\n"
         "  /run                 — cmake + make + Binary starten\n"
         "  /plan <Auftrag>      — Projekt analysieren + Aufgabenplan erstellen\n"
-        "  /execute             — Execute-Modus starten (nächster Pending-Node)\n"
+        "  /execute             — Execute-Modus starten\n"
         "  /saveDB              — TaskTree + Thoughts in SQLite speichern\n"
         "  /loadDB              — TaskTree + Thoughts aus SQLite laden\n"
+        "  /import <pfad>       — Quellcode in Node-Struktur importieren\n"
         "  /summarize           — Konversation manuell zusammenfassen\n"
         "  /undo [Datei]        — letzten git-commit rückgängig\n"
         "  /diff                — git diff anzeigen";
 }
 
-// ─── handleExecute ───────────────────────────────────────────────────────────
-// Startet den Execute-Modus ab dem nächsten Pending-Node.
-//
-// Marker: "__EXECUTE__" → Agent::onUserMessage() erkennt ihn und
-// ruft startExecute() auf.
-//
-// Warum ein Marker statt Signal?
-//   CommandProcessor kennt Agent nicht (Dependency-Inversion).
-//   Konsistent mit "__PLAN__:" und "__SUMMARIZE__".
+// ─── handleImport (NEU) ───────────────────────────────────────────────────────
+// Startet den Import-Modus: Quellcode → Node-Baum.
+// Funktioniert mit Einzeldateien und Verzeichnissen.
+// Marker: "__IMPORT__:<pfad>" → Agent::onUserMessage() → AgentChat::handleImport()
+CommandProcessor::ProcessResult CommandProcessor::handleImport(const QStringList &args)
+{
+    ProcessResult r;
+    r.handled = true;
+
+    if (args.isEmpty()) {
+        r.notice         = "Fehler: /import braucht einen Pfad.\n"
+                           "Beispiel: /import src/TodoModel.cpp\n"
+                           "          /import src/\n"
+                           "          /import TodoApp/";
+        r.noticeCssClass = "error";
+        return r;
+    }
+
+    QString path = args.join(' ');
+    r.prompt         = "__IMPORT__:" + path;
+    r.notice         = QString("→ /import: %1").arg(path);
+    r.noticeCssClass = "system";
+    return r;
+}
+
 CommandProcessor::ProcessResult CommandProcessor::handleExecute(const QStringList &args)
 {
     Q_UNUSED(args)
@@ -90,9 +108,6 @@ CommandProcessor::ProcessResult CommandProcessor::handleExecute(const QStringLis
     return r;
 }
 
-// ─── handleSaveDB ────────────────────────────────────────────────────────────
-// Speichert TaskTree + ExecuteMemory in SQLite.
-// Marker: "__SAVEDB__"
 CommandProcessor::ProcessResult CommandProcessor::handleSaveDB(const QStringList &args)
 {
     Q_UNUSED(args)
@@ -104,9 +119,6 @@ CommandProcessor::ProcessResult CommandProcessor::handleSaveDB(const QStringList
     return r;
 }
 
-// ─── handleLoadDB ────────────────────────────────────────────────────────────
-// Lädt TaskTree + ExecuteMemory aus SQLite.
-// Marker: "__LOADDB__"
 CommandProcessor::ProcessResult CommandProcessor::handleLoadDB(const QStringList &args)
 {
     Q_UNUSED(args)
@@ -118,7 +130,6 @@ CommandProcessor::ProcessResult CommandProcessor::handleLoadDB(const QStringList
     return r;
 }
 
-// ─── handlePlan ──────────────────────────────────────────────────────────────
 CommandProcessor::ProcessResult CommandProcessor::handlePlan(const QStringList &args)
 {
     ProcessResult r;
@@ -138,12 +149,10 @@ CommandProcessor::ProcessResult CommandProcessor::handlePlan(const QStringList &
     return r;
 }
 
-// ─── handleInit ──────────────────────────────────────────────────────────────
 CommandProcessor::ProcessResult CommandProcessor::handleInit(const QStringList &args)
 {
     ProcessResult r;
     r.handled = true;
-
     QString projectName = args.isEmpty() ? "MeinProjekt" : args.first();
     m_currentProject    = projectName;
 
@@ -152,7 +161,7 @@ CommandProcessor::ProcessResult CommandProcessor::handleInit(const QStringList &
         "Schritte:\n"
         "1. Prüfe ob '%1/' existiert. Falls nicht: mkdir '%1'.\n"
         "2. Ermittle das aktuelle Datum via get_time.\n"
-        "3. Lege '%1/.gitignore' an mit: build/\\n*.o\\n*.a\\n*.so\\n*.user\\n.DS_Store\n"
+        "3. Lege '%1/.gitignore' an.\n"
         "4. Lege '%1/AGENT.md' an.\n"
         "5. Lege '%1/CMakeLists.txt' an falls nicht vorhanden.\n"
         "6. Lege '%1/src/' an.\n"
@@ -165,7 +174,6 @@ CommandProcessor::ProcessResult CommandProcessor::handleInit(const QStringList &
     return r;
 }
 
-// ─── handleBuild ─────────────────────────────────────────────────────────────
 CommandProcessor::ProcessResult CommandProcessor::handleBuild(const QStringList &args)
 {
     Q_UNUSED(args)
@@ -176,14 +184,13 @@ CommandProcessor::ProcessResult CommandProcessor::handleBuild(const QStringList 
         "Führe einen vollständigen Build durch.\n\n"
         "1. Prüfe ob '%1/CMakeLists.txt' existiert.\n"
         "2. cmake_build: source_dir '%1', build_dir '%1/build'\n"
-        "3. Berichte Erfolg oder Fehler mit Ursache.\n"
+        "3. Berichte Erfolg oder Fehler.\n"
     ).arg(project);
     r.notice         = "→ /build";
     r.noticeCssClass = "system";
     return r;
 }
 
-// ─── handleCompile ───────────────────────────────────────────────────────────
 CommandProcessor::ProcessResult CommandProcessor::handleCompile(const QStringList &args)
 {
     Q_UNUSED(args)
@@ -192,16 +199,14 @@ CommandProcessor::ProcessResult CommandProcessor::handleCompile(const QStringLis
     QString project = m_currentProject.isEmpty() ? "." : m_currentProject;
     r.prompt = QString(
         "Kompiliere das Projekt (nur make).\n\n"
-        "1. Prüfe ob '%1/build/CMakeCache.txt' existiert.\n"
-        "2. cmake_build: source_dir '%1', build_dir '%1/build'\n"
-        "3. Berichte Ergebnis.\n"
+        "1. cmake_build: source_dir '%1', build_dir '%1/build'\n"
+        "2. Berichte Ergebnis.\n"
     ).arg(project);
     r.notice         = "→ /compile";
     r.noticeCssClass = "system";
     return r;
 }
 
-// ─── handleRun ───────────────────────────────────────────────────────────────
 CommandProcessor::ProcessResult CommandProcessor::handleRun(const QStringList &args)
 {
     Q_UNUSED(args)
@@ -220,7 +225,6 @@ CommandProcessor::ProcessResult CommandProcessor::handleRun(const QStringList &a
     return r;
 }
 
-// ─── handleSummarize ─────────────────────────────────────────────────────────
 CommandProcessor::ProcessResult CommandProcessor::handleSummarize(const QStringList &args)
 {
     Q_UNUSED(args)
@@ -232,7 +236,6 @@ CommandProcessor::ProcessResult CommandProcessor::handleSummarize(const QStringL
     return r;
 }
 
-// ─── handleUndo ──────────────────────────────────────────────────────────────
 CommandProcessor::ProcessResult CommandProcessor::handleUndo(const QStringList &args)
 {
     ProcessResult r;
@@ -260,7 +263,6 @@ CommandProcessor::ProcessResult CommandProcessor::handleUndo(const QStringList &
     return r;
 }
 
-// ─── handleDiff ──────────────────────────────────────────────────────────────
 CommandProcessor::ProcessResult CommandProcessor::handleDiff(const QStringList &args)
 {
     ProcessResult r;

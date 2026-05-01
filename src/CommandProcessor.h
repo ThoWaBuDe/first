@@ -2,14 +2,6 @@
 #include <QObject>
 #include <QString>
 
-// ─── CommandProcessor ─────────────────────────────────────────────────────────
-// Verarbeitet Slash-Kommandos aus der Eingabezeile.
-//
-// Neue Kommandos:
-//   /saveDB   — TaskTree + ExecuteMemory in SQLite speichern
-//   /loadDB   — TaskTree + ExecuteMemory aus SQLite laden
-//   /execute  — Execute-Modus starten (ab nächstem Pending-Node)
-
 class CommandProcessor : public QObject {
     Q_OBJECT
 
@@ -33,12 +25,13 @@ private:
     ProcessResult handleCompile(const QStringList &args);
     ProcessResult handleRun(const QStringList &args);
     ProcessResult handlePlan(const QStringList &args);
-    ProcessResult handleExecute(const QStringList &args);   // NEU
-    ProcessResult handleSaveDB(const QStringList &args);    // NEU
-    ProcessResult handleLoadDB(const QStringList &args);    // NEU
+    ProcessResult handleExecute(const QStringList &args);
+    ProcessResult handleSaveDB(const QStringList &args);
+    ProcessResult handleLoadDB(const QStringList &args);
     ProcessResult handleSummarize(const QStringList &args);
     ProcessResult handleUndo(const QStringList &args);
     ProcessResult handleDiff(const QStringList &args);
+    ProcessResult handleImport(const QStringList &args); // NEU
 
     QString m_currentProject;
 };

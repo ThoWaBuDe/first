@@ -3,15 +3,10 @@
 #include <QString>
 #include <QSettings>
 #include "ChatTemplate.h"
+#include "ToolCallFormat.h"
 
 // ─── AppConfig ────────────────────────────────────────────────────────────────
 // Singleton — hält alle persistenten Einstellungen.
-//
-// NEU (Punkt I): SamplerExecute-Profil
-//   Eigene Sampler-Parameter für den Execute-Modus.
-//   Rationale: Execute codiert deterministisch (niedrige Temp),
-//   braucht aber etwas mehr Kreativität als Tool-Calls (Temp 0.2 statt 0.1).
-//   Optimale Werte: top_k=20, temp=0.2, top_p=0.60, min_p=0.05
 
 class AppConfig : public QObject {
     Q_OBJECT
@@ -45,11 +40,7 @@ public:
     void setToolTopP(float v) { m_toolTopP = v; save(); }
     void setToolMinP(float v) { m_toolMinP = v; save(); }
 
-    // ── Sampler Execute (NEU — Punkt I) ───────────────────────────────────
-    // Eigenes Profil für den Execute-Modus (Code-Generierung).
-    // Bewusst zwischen Chat (kreativ) und Tool (deterministisch):
-    //   - Niedrigere Temp als Chat → weniger Halluzination im Code
-    //   - Höhere Temp als Tool → Algorithmen brauchen etwas Flexibilität
+    // ── Sampler Execute ───────────────────────────────────────────────────
     int   executeTopK() const { return m_executeTopK; }
     float executeTemp() const { return m_executeTemp; }
     float executeTopP() const { return m_executeTopP; }
@@ -103,6 +94,26 @@ public:
         m_customChatTemplate = v; save(); emit chatTemplateChanged(); }
     void setDetectedJinjaTemplate(const QString &v) { m_detectedJinjaTemplate = v; }
 
+    // ── Tool-Call-Format (NEU) ────────────────────────────────────────────
+    // Preset: was der User im ConfigDialog eingestellt hat (Auto = auto-detect)
+    // Effective: das tatsächlich aktive Format nach Detection
+    //
+    // Analogie zu ChatTemplate:
+    //   toolCallFormatPreset() = was der User will (oder Auto)
+    //   effectiveToolCallFormat() = was tatsächlich verwendet wird
+    ToolCallFormat::Preset toolCallFormatPreset() const   { return m_toolCallFormat; }
+    ToolCallFormat::Preset effectiveToolCallFormat() const { return m_effectiveToolCallFormat; }
+
+    void setToolCallFormatPreset(ToolCallFormat::Preset v) {
+        m_toolCallFormat = v;
+        save();
+        emit toolCallFormatChanged(v);
+    }
+    // Wird von Agent::onToolFormatDetected() gesetzt — nicht direkt vom User
+    void setEffectiveToolCallFormat(ToolCallFormat::Preset v) {
+        m_effectiveToolCallFormat = v;
+    }
+
     // ── User System-Prompt ────────────────────────────────────────────────
     QString userSystemPrompt() const           { return m_userSystemPrompt; }
     void setUserSystemPrompt(const QString &v) { m_userSystemPrompt = v; save(); }
@@ -130,8 +141,6 @@ public:
     void setExecuteSandboxProject(const QString &v){ m_executeSandboxProject = v; save(); }
     bool    assembleOnlyDone() const               { return m_assembleOnlyDone; }
     void setAssembleOnlyDone(bool v)               { m_assembleOnlyDone = v; save(); }
-
-    // Debug-Logging Execute
     bool    debugExecute() const                   { return m_debugExecute; }
     void setDebugExecute(bool v)                   { m_debugExecute = v; save(); }
     QString debugLogDir() const                    { return m_debugLogDir; }
@@ -141,6 +150,7 @@ signals:
     void chatLoggingChanged(bool enabled);
     void modelPathChanged(const QString &path);
     void chatTemplateChanged();
+    void toolCallFormatChanged(ToolCallFormat::Preset preset); // NEU
 
 private:
     explicit AppConfig(QObject *parent = nullptr);
@@ -149,17 +159,12 @@ private:
     // ── Defaults ──────────────────────────────────────────────────────────
     QString m_modelPath   = "/home/thomas/ai/models/Qwen3.5-9B-Q6_K.gguf";
 
-    // Chat: kreativ
     int   m_chatTopK = 40;    float m_chatTemp = 0.7f;
     float m_chatTopP = 0.95f; float m_chatMinP = 0.05f;
 
-    // Tool: deterministisch (JSON-Ausgabe)
     int   m_toolTopK = 20;    float m_toolTemp = 0.1f;
     float m_toolTopP = 0.50f; float m_toolMinP = 0.05f;
 
-    // Execute: zwischen Chat und Tool (Code-Generierung)
-    // Rationale: temp=0.2 → weniger Halluzination als Chat,
-    //            mehr Flexibilität als Tool (Algorithmen sind keine JSON-Strukturen)
     int   m_executeTopK = 20;    float m_executeTemp = 0.2f;
     float m_executeTopP = 0.60f; float m_executeMinP = 0.05f;
 
@@ -181,6 +186,11 @@ private:
     ChatTemplate::Preset m_chatTemplatePreset    = ChatTemplate::Preset::Auto;
     QString              m_customChatTemplate    = "";
     QString              m_detectedJinjaTemplate = "";
+
+    // NEU: Tool-Call-Format
+    ToolCallFormat::Preset m_toolCallFormat          = ToolCallFormat::Preset::Auto;
+    ToolCallFormat::Preset m_effectiveToolCallFormat = ToolCallFormat::Preset::QwenXmlTags;
+
     QString m_userSystemPrompt = "";
 
     QString m_indexSourceRoot  = "";
