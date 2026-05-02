@@ -8,7 +8,7 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 # ─── Qt6 ────────────────────────────────────────────────────────────────────
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Sql)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Sql Network)
 
 # ─── Llama.cpp ──────────────────────────────────────────────────────────────
 find_package(PkgConfig REQUIRED)
@@ -27,11 +27,14 @@ set(SOURCES
     src/AI/LlamaWorker.cpp
     src/MCP/McpClient.cpp
     src/MCP/McpManager.cpp
+    src/MCP/McpClientSse.cpp
     src/Chat/ChatModel.cpp
     src/Config/AppConfig.cpp
     src/Chat/ChatLogger.cpp
     src/UI/ConfigDialog.cpp
     src/UI/EditorDock.cpp
+    src/UI/IncusDock.cpp
+    src/Incus/IncusManager.cpp
 )
 
 set(HEADERS
@@ -43,14 +46,18 @@ set(HEADERS
     src/AI/LlamaWorker.h
     src/MCP/McpClient.h
     src/MCP/McpManager.h
+    src/MCP/McpClientSse.h
     src/Chat/ChatModel.h
     src/Config/AppConfig.h
     src/Chat/ChatLogger.h
     src/UI/ConfigDialog.h
     src/UI/EditorDock.h
+    src/UI/IncusDock.h
+    src/UI/SearchBar.h
     src/Chat/ChatTemplate.h
     src/Chat/ToolCallFormat.h
-    src/UI/SearchBar.h
+    src/Incus/IncusManager.h
+    src/Incus/IncusContainer.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}
@@ -60,6 +67,8 @@ add_executable(LlamaQt ${SOURCES} ${HEADERS}
 target_include_directories(LlamaQt PRIVATE
     src/
     src/UI
+    src/Incus
+    src/MCP
     ${LLAMA_INCLUDE_DIRS}
 )
 
@@ -68,6 +77,7 @@ target_link_libraries(LlamaQt PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Sql
+    Qt6::Network
     PkgConfig::LLAMA
 )
 
@@ -78,3 +88,4 @@ add_subdirectory(mcp-servers/compile)
 add_subdirectory(mcp-servers/websearch)
 add_subdirectory(mcp-servers/tree-sitter)
 add_subdirectory(mcp-servers/clang)
+add_subdirectory(mcp-servers/proxy)

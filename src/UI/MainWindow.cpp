@@ -38,9 +38,15 @@ void MainWindow::setupUi()
     addDockWidget(Qt::BottomDockWidgetArea, m_editorDock);
     m_editorDock->hide();
 
+    // ─── Incus-Dock (rechts) ──────────────────────────────────────────────
+    m_incusDock = new IncusDock(this);
+    addDockWidget(Qt::RightDockWidgetArea, m_incusDock);
+    m_incusDock->hide();
+
     // ─── Ansicht-Menü: alle Docks togglebar ───────────────────────────────
     QMenu *viewMenu = menuBar()->addMenu("&Ansicht");
     viewMenu->addAction(m_editorDock->toggleViewAction());
+    viewMenu->addAction(m_incusDock->toggleViewAction());
     // toggleViewAction() liefert eine QAction die den Dock ein-/ausblendet.
     // Qt erstellt sie automatisch für jeden QDockWidget.
 

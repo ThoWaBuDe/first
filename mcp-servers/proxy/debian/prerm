@@ -1,0 +1,4 @@
+#!/bin/bash
+set -e
+systemctl stop    llamaqt-mcp || true
+systemctl disable llamaqt-mcp || true

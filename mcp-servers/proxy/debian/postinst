@@ -1,0 +1,18 @@
+#!/bin/bash
+set -e
+
+# llamaqt User anlegen falls nicht vorhanden
+if ! id -u llamaqt &>/dev/null; then
+    useradd -r -s /bin/false -d /home/llamaqt -m llamaqt
+fi
+
+# Sandbox-Verzeichnis
+mkdir -p /home/llamaqt/sandbox
+chown llamaqt:llamaqt /home/llamaqt/sandbox
+
+# systemd neu laden und Service aktivieren
+systemctl daemon-reload
+systemctl enable llamaqt-mcp
+systemctl start  llamaqt-mcp
+
+echo "llamaqt-mcp-proxy läuft auf Port 9000"

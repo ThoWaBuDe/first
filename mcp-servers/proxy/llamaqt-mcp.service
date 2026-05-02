@@ -1,0 +1,14 @@
+[Unit]
+Description=LlamaQt MCP Server Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=llamaqt
+Group=llamaqt
+ExecStart=/usr/lib/llamaqt-mcp/llamaqt-mcp-proxy --port 9000 --sandbox /home/llamaqt/sandbox
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

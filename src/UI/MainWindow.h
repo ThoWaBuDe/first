@@ -6,6 +6,7 @@
 #include "UI/ConfigDialog.h"
 #include "UI/EditorDock.h"
 #include "UI/SearchBar.h"
+#include "UI/IncusDock.h"
 
 
 namespace Ui { class MainWindow; }
@@ -52,7 +53,8 @@ private:
     Ui::MainWindow *ui;
     Agent          *m_agent;
     EditorDock     *m_editorDock;
-    SearchBar *m_searchBar = nullptr;
+    IncusDock      *m_incusDock;
+    SearchBar      *m_searchBar = nullptr;
 
     static constexpr int AUTOSCROLL_THRESHOLD = 20;
 };
