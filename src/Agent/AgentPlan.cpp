@@ -368,18 +368,25 @@ QString AgentPlan::handleCreateNode(const QJsonObject &args)
     TaskScope scope = (scopeStr == "external")
                       ? TaskScope::External : TaskScope::Internal;
 
-    TaskNode *node = m_agent.m_taskTree.createNode(
-        title, description, level, scope, order, parent, symbol);
 
+         // import_strategy (für /import Befehl — optional, default "none")
+         QString strategyStr = args.value("import_strategy").toString();
+         ImportStrategy strategy = strategyStr.isEmpty()
+             ? ImportStrategy::None
+             : TaskNode::importStrategyFromString(strategyStr);
+              TaskNode *node = m_agent.m_taskTree.createNode(
+                  title, description, level, scope, order, parent, symbol, strategy);
     emit m_agent.taskTreeUpdated();
 
     return QString(
-        "{\"id\": %1, \"title\": \"%2\", \"level\": %3%4}")
-        .arg(node->id)
-        .arg(node->title)
-        .arg(node->level)
-        .arg(symbol.isEmpty() ? ""
-             : QString(", \"symbol\": \"%1\"").arg(symbol));
+             "{\"id\": %1, \"title\": \"%2\", \"level\": %3%4%5}")
+             .arg(node->id)
+             .arg(node->title)
+             .arg(node->level)
+             .arg(symbol.isEmpty() ? ""
+                  : QString(", \"symbol\": \"%1\"").arg(symbol))
+             .arg(strategy == ImportStrategy::None ? ""
+                  : QString(", \"import_strategy\": \"%1\"").arg(strategyStr));
 }
 
 // ─── handleSetDependsOn ───────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
-#include "Agent.h"
-#include "AgentChat.h"
-#include "AgentPlan.h"
-#include "AgentExecute.h"
-#include "AgentAssemble.h"
-#include "AgentUtils.h"
+#include "Agent/Agent.h"
+#include "Agent/AgentChat.h"
+#include "Agent/AgentPlan.h"
+#include "Agent/AgentExecute.h"
+#include "Agent/AgentAssemble.h"
+#include "Agent/AgentUtils.h"
+#include "Agent/AgentImport.h"   // NEU
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -34,13 +35,14 @@ Agent::Agent(const QString &modelPath, QObject *parent)
     m_plan     = new AgentPlan(*this);
     m_execute  = new AgentExecute(*this);
     m_assemble = new AgentAssemble(*this);
+    m_import   = new AgentImport(*this);   // NEU
 
     m_worker = new LlamaWorker();
     m_worker->moveToThread(&m_workerThread);
 
     qRegisterMetaType<LlamaWorker::SamplerProfile>();
     qRegisterMetaType<ChatTemplate::Preset>();
-    qRegisterMetaType<ToolCallFormat::Preset>(); // NEU
+    qRegisterMetaType<ToolCallFormat::Preset>();
     qRegisterMetaType<QVector<ChatMessage>>("QVector<ChatMessage>");
     qRegisterMetaType<AgentMode>();
 
@@ -58,7 +60,6 @@ Agent::Agent(const QString &modelPath, QObject *parent)
             m_worker, &QObject::deleteLater);
     connect(m_worker, &LlamaWorker::chatTemplateDetected,
             this,     &Agent::onChatTemplateDetected);
-    // NEU: Tool-Call-Format Detection verbinden
     connect(m_worker, &LlamaWorker::toolCallFormatDetected,
             this,     &Agent::onToolFormatDetected);
 
@@ -95,6 +96,7 @@ Agent::~Agent()
     delete m_plan;
     delete m_execute;
     delete m_assemble;
+    delete m_import;   // NEU
 }
 
 void Agent::start()
@@ -131,12 +133,10 @@ void Agent::start()
     });
 }
 
-// ─── buildFullSystemPrompt ────────────────────────────────────────────────────
-// NEU: übergibt m_activeToolFormat an McpManager
 QString Agent::buildFullSystemPrompt() const
 {
     QString userPart = AppConfig::instance().userSystemPrompt().trimmed();
-    QString mcpPart  = m_mcp.buildToolsSystemPrompt(m_activeToolFormat); // ← Format
+    QString mcpPart  = m_mcp.buildToolsSystemPrompt(m_activeToolFormat);
     if (userPart.isEmpty()) return mcpPart;
     return userPart + "\n\n" + mcpPart;
 }
@@ -187,9 +187,6 @@ void Agent::onChatTemplateDetected(const QString &jinjaTemplate,
     }
 }
 
-// ─── onToolFormatDetected (NEU) ───────────────────────────────────────────────
-// Analogie zu onChatTemplateDetected — entscheidet Auto vs. manuell.
-// Setzt m_activeToolFormat und baut System-Prompt neu.
 void Agent::onToolFormatDetected(ToolCallFormat::Preset detectedFormat,
                                   const QString &source)
 {
@@ -206,7 +203,6 @@ void Agent::onToolFormatDetected(ToolCallFormat::Preset detectedFormat,
     m_activeToolFormat = effective;
     cfg.setEffectiveToolCallFormat(effective);
 
-    // System-Prompt mit neuem Format neu aufbauen
     m_chatModel.setSystemPrompt(buildFullSystemPrompt());
 
     QString effectiveName = ToolCallFormat::presetName(effective);
@@ -307,13 +303,15 @@ void Agent::onUserMessage(const QString &text)
                 emit inputEnabled(true);
                 return;
             }
-            // NEU: /import
+            // NEU: /import → AgentImport (nicht mehr AgentChat)
             if (result.prompt.startsWith("__IMPORT__:")) {
                 QString importPath = result.prompt.mid(11);
                 emit appendChat(
                     QString("<b>Import:</b> %1").arg(importPath.toHtmlEscaped()),
                     "user");
-                m_chat->handleImport(importPath);
+                m_mode = AgentMode::Plan;
+                emit modeChanged(m_mode);
+                m_import->startImport(importPath);
                 return;
             }
             if (result.prompt.isEmpty()) return;
@@ -362,7 +360,7 @@ void Agent::onStop()
     m_generating        = false;
     m_updatingThoughts  = false;
     m_continuationCount = 0;
-    m_pendingToolCalls.clear(); // NEU: Queue leeren
+    m_pendingToolCalls.clear();
     m_pendingToolIdx = 0;
 
     if (m_worker) m_worker->stopGeneration();
@@ -390,7 +388,7 @@ void Agent::onClearChat()
     ++m_sessionId;
     m_generating        = false;
     m_updatingThoughts  = false;
-    m_pendingToolCalls.clear(); // NEU
+    m_pendingToolCalls.clear();
     m_pendingToolIdx = 0;
 
     if (m_worker) m_worker->stopGeneration();
@@ -509,7 +507,6 @@ void Agent::onTokenReceived(const QString &token)
 }
 
 // ─── onGenerationDone ─────────────────────────────────────────────────────────
-// NEU: format-agnostische Tool-Call-Erkennung via ToolCallFormat::*()
 void Agent::onGenerationDone(const QString &fullResponse)
 {
     m_generating = false;
@@ -517,8 +514,6 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     uint32_t mySession = m_sessionId;
 
-    // ── Shortcuts für format-agnostische Prüfungen ────────────────────────
-    // Statt hardcoded "<tool_call>" überall — einmal hier definiert.
     auto hasToolCall = [&]() {
         return ToolCallFormat::containsToolCall(fullResponse, m_activeToolFormat);
     };
@@ -535,6 +530,42 @@ void Agent::onGenerationDone(const QString &fullResponse)
             QString("<b>Thoughts aktualisiert:</b> %1 Einträge.")
             .arg(m_executeMemory.count()), "system");
         m_execute->advanceExecute();
+        return;
+    }
+
+    // ── Import-Modus (NEU) ────────────────────────────────────────────────
+    // Import läuft im Plan-Modus, aber m_import->isImportMode() unterscheidet
+    // ihn vom normalen /plan-Befehl.
+    if (m_import->isImportMode()) {
+        if (hasToolCall() && isComplete()) {
+            m_chatModel.addAssistantMessage(fullResponse);
+            m_import->handleImportToolCall(fullResponse, mySession);
+            return;
+        }
+        if (hasToolCall() && !isComplete()) {
+            ++m_continuationCount;
+            if (m_continuationCount > MAX_CONTINUATIONS) {
+                m_continuationCount = 0;
+                emit appendTools(
+                    "Import: Tool-Call unvollständig — nächste Datei.", "error");
+                if (m_currentNode) {
+                    m_taskTree.setStatus(m_currentNode, TaskStatus::Failed);
+                    m_taskTree.save();
+                    emit taskTreeUpdated();
+                    m_currentNode = nullptr;
+                }
+                m_import->advanceImport();
+                return;
+            }
+            m_chatModel.addAssistantMessage(fullResponse);
+            m_generating      = true;
+            m_generatedTokens = 0;
+            startGeneration(LlamaWorker::SamplerProfile::Tool);
+            return;
+        }
+        // Kein Tool-Call → Ergebnis verarbeiten (plan_done o.ä.)
+        m_continuationCount = 0;
+        m_import->handleImportResult(fullResponse, mySession);
         return;
     }
 

@@ -20,6 +20,7 @@ class AgentChat;
 class AgentPlan;
 class AgentExecute;
 class AgentAssemble;
+class AgentImport;   // NEU
 
 enum class AgentMode { Chat, Plan, Execute };
 
@@ -30,6 +31,7 @@ class Agent : public QObject {
     friend class AgentPlan;
     friend class AgentExecute;
     friend class AgentAssemble;
+    friend class AgentImport;   // NEU
 
 public:
     explicit Agent(const QString &modelPath, QObject *parent = nullptr);
@@ -42,8 +44,10 @@ public:
     const ExecuteMemory &executeMemory() const { return m_executeMemory; }
     AgentMode mode() const { return m_mode; }
 
-    // NEU: aktives Tool-Call-Format (für AgentChat/Execute/Plan)
     ToolCallFormat::Preset activeToolFormat() const { return m_activeToolFormat; }
+
+    // NEU: Zugriff auf Import-Agent für onGenerationDone()
+    AgentImport *importAgent() const { return m_import; }
 
     static const QStringList PLAN_ALLOWED_TOOLS;
     static const QStringList EXECUTE_ALLOWED_TOOLS;
@@ -82,7 +86,6 @@ private slots:
     void onError(const QString &error);
     void onChatTemplateDetected(const QString &jinjaTemplate,
                                  ChatTemplate::Preset detectedPreset);
-    // NEU: Tool-Call-Format nach Modell-Load
     void onToolFormatDetected(ToolCallFormat::Preset detectedFormat,
                                const QString &source);
 
@@ -111,14 +114,10 @@ private:
     AgentPlan    *m_plan     = nullptr;
     AgentExecute *m_execute  = nullptr;
     AgentAssemble*m_assemble = nullptr;
+    AgentImport  *m_import   = nullptr;  // NEU
 
-    // NEU: aktives Tool-Call-Format
-    // Wird von onToolFormatDetected() gesetzt (Auto-Detection oder User-Wahl)
     ToolCallFormat::Preset m_activeToolFormat = ToolCallFormat::Preset::QwenXmlTags;
 
-    // NEU: Queue für Mistral-Array-Tool-Calls
-    // Mehrere Tool-Calls werden sequenziell ausgeführt.
-    // AgentChat::executeNextPendingCall() arbeitet die Queue ab.
     QVector<ParsedToolCall> m_pendingToolCalls;
     int                     m_pendingToolIdx = 0;
 

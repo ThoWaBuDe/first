@@ -3,23 +3,8 @@
 // Ein Knoten im hierarchischen Aufgabenbaum.
 //
 // NEU (Punkt H): symbol-Feld
-//   Eindeutiger Bezeichner für das zu implementierende Symbol.
-//   Format: "ClassName::methodName()" oder "ClassName::memberName"
-//   Zweck:
-//     - Duplikat-Erkennung im Optimizer: dasselbe Symbol darf nur in
-//       EINEM Node implementiert werden
-//     - Grundlage für späteren Clang-AST-Abgleich (Punkt L)
-//     - Macht dependsOn semantisch: "ich brauche dieses Symbol"
-//
-//   Beispiele:
-//     "Timer::start()"         — Methode
-//     "GameState::m_board"     — Member
-//     "GameState"              — Klasse (H2-Node)
-//     ""                       — leer = kein eindeutiges Symbol (Datei-Kopf etc.)
-//
 // NEU (Punkt N): validationResult-Feld
-//   Ergebnis des H4-Validierungs-Nodes.
-//   Format: "ok" oder Fehlerbeschreibung.
+// NEU (Import):  importStrategy-Feld
 
 #include <QString>
 #include <QDateTime>
@@ -35,7 +20,7 @@ enum class TaskLevel : int {
     Files      = 1,
     Class      = 2,
     Impl       = 3,
-    Validation = 4,  // NEU (Punkt N): Validierungs-Node nach H3
+    Validation = 4,
 };
 
 enum class TaskScope : int {
@@ -49,6 +34,32 @@ enum class TaskStatus : int {
     Done     = 2,
     Failed   = 3,
     Blocked  = 4,
+    Skip     = 5
+};
+
+// ─── ImportStrategy ───────────────────────────────────────────────────────────
+// Steuert wie AgentImport eine Datei in Phase 2 analysiert.
+//
+// None     — kein Import (normaler Plan-Node, Phase 2 überspringt ihn)
+// Header   — read_file → result befüllen, keine H3-Kinder
+//            Für .h/.hpp Dateien: Interface, Member, Slots sind relevant
+// Symbols  — list_symbols + get_function_body → H3-Nodes pro Methode
+//            Für .cpp Dateien: Implementierung aufteilen
+// ReadFile — read_file → result befüllen, keine H3-Kinder
+//            Für CMakeLists.txt, *.md, *.ui, *.py etc.
+// Skip     — Datei nicht importieren
+//
+// Das LLM setzt die Strategie in Phase 1 via create_node "import_strategy"-Parameter.
+// LlamaQt liest das Feld in advanceImport() und steuert Phase 2 entsprechend.
+//
+// Analogie AVR: wie ein Peripheral-Mode-Register —
+// das LLM konfiguriert den Modus, LlamaQt führt ihn aus.
+enum class ImportStrategy : int {
+    None     = 0,
+    Header   = 1,
+    Symbols  = 2,
+    ReadFile = 3,
+    Skip     = 4,
 };
 
 struct TaskNode
@@ -66,35 +77,19 @@ struct TaskNode
     QString   title;
     QString   description;
 
-    // ── Symbol (NEU — Punkt H) ────────────────────────────────────────────────
-    // Eindeutiger C++-Symbolname für diesen Node.
-    // Leer = kein spezifisches Symbol (z.B. Datei-Kopf, CMakeLists.txt).
-    //
-    // Konvention:
-    //   H2 (.h):    "ClassName"                    → Klassen-Interface
-    //   H2 (.cpp):  "ClassName"                    → Datei insgesamt
-    //   H3:         "ClassName::methodName()"      → einzelne Methode
-    //   H3 Member:  "ClassName::m_memberName"      → Member-Variable
-    //   H3 frei:    "functionName()"               → freie Funktion
-    //
-    // Warum kein vollständiges Typ-System?
-    //   Das 9B-Modell soll den Symbol-String selbst generieren.
-    //   Zu strenge Validierung würde Halluzinationen nicht verhindern
-    //   sondern nur die Fehlerbehandlung komplizieren.
-    //   Der String wird für Duplikat-Erkennung per Gleichheitsvergleich
-    //   genutzt — Groß-/Kleinschreibung wird beachtet.
+    // ── Symbol (Punkt H) ──────────────────────────────────────────────────────
     QString   symbol;
 
     // ── Execute-Output ────────────────────────────────────────────────────────
-    QString   result;       // NUR sauberer Code (aus <code>...</code>)
-    QString   sideOutput;   // Thinking, Warnungen, Erklärungen
-    QString   buildPrompt;  // vollständiger Prompt (Debugging)
+    QString   result;
+    QString   sideOutput;
+    QString   buildPrompt;
 
-    // ── Validierung (NEU — Punkt N) ───────────────────────────────────────────
-    // Wird vom H4-Validierungs-Node befüllt.
-    // "ok"           → Implementierung ist korrekt
-    // "<Fehler>"     → Beschreibung des Problems (geht zurück an Optimizer)
+    // ── Validierung (Punkt N) ─────────────────────────────────────────────────
     QString   validationResult;
+
+    // ── Import-Strategie (NEU) ────────────────────────────────────────────────
+    ImportStrategy importStrategy = ImportStrategy::None;
 
     // ── Horizontale Abhängigkeiten ────────────────────────────────────────────
     QList<qint64> dependsOn;
@@ -148,13 +143,10 @@ struct TaskNode
     bool isLeaf() const { return children.empty(); }
     bool isRoot() const { return parent == nullptr; }
 
-    // Prüft ob dieser Node ein Validierungs-Node ist (H4)
     bool isValidationNode() const {
         return level == static_cast<int>(TaskLevel::Validation);
     }
 
-    // Gibt den H3-Geschwister-Node zurück den dieser H4-Node validiert.
-    // Konvention: H4-Node ist das letzte Kind seines H3-Elters.
     const TaskNode *validatedNode() const {
         if (!isValidationNode() || !parent) return nullptr;
         return parent;
@@ -224,6 +216,27 @@ struct TaskNode
         return "Code";
     }
 
+    // ── ImportStrategy Konvertierung ──────────────────────────────────────────
+    // String-basiert damit das LLM leserliche Namen verwenden kann.
+    // Analogie AVR: enum↔string Mapping wie in einer Konfigurations-Tabelle.
+    static ImportStrategy importStrategyFromString(const QString &s) {
+        if (s == "header")   return ImportStrategy::Header;
+        if (s == "symbols")  return ImportStrategy::Symbols;
+        if (s == "read_file") return ImportStrategy::ReadFile;
+        if (s == "skip")     return ImportStrategy::Skip;
+        return ImportStrategy::None;
+    }
+
+    static QString importStrategyToString(ImportStrategy s) {
+        switch (s) {
+            case ImportStrategy::Header:   return "header";
+            case ImportStrategy::Symbols:  return "symbols";
+            case ImportStrategy::ReadFile: return "read_file";
+            case ImportStrategy::Skip:     return "skip";
+            default:                       return "none";
+        }
+    }
+
     // ── String-Konvertierungen ────────────────────────────────────────────────
     static QString levelName(int l) {
         switch (l) {
@@ -273,11 +286,12 @@ struct TaskNode
             {"insertion_idx",     insertionIdx},
             {"title",             title},
             {"description",       description},
-            {"symbol",            symbol},           // NEU
+            {"symbol",            symbol},
             {"result",            result},
             {"side_output",       sideOutput},
             {"build_prompt",      buildPrompt},
-            {"validation_result", validationResult}, // NEU
+            {"validation_result", validationResult},
+            {"import_strategy",   importStrategyToString(importStrategy)}, // NEU
             {"depends_on",        deps},
             {"status",            statusName(status)},
             {"created_at",        createdAt.toString(Qt::ISODate)},

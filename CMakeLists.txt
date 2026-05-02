@@ -26,6 +26,7 @@ set(SOURCES
     src/Agent/AgentExecute.cpp
     src/Agent/AgentAssemble.cpp
     src/Agent/AgentUtils.cpp
+    src/Agent/AgentImport.cpp
 
     src/Task/CommandProcessor.cpp
     src/AI/LlamaWorker.cpp
@@ -48,6 +49,8 @@ set(HEADERS
     src/Agent/AgentExecute.h
     src/Agent/AgentAssemble.h
     src/Agent/AgentUtils.h
+    src/Agent/AgentImport.h
+
     src/Task/CommandProcessor.h
     src/AI/LlamaWorker.h
     src/MCP/McpClient.h

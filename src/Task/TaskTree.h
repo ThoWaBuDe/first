@@ -3,19 +3,17 @@
 // RAM-first Aufgabenbaum mit SQLite-Persistenz.
 //
 // NEU (Punkt H): Symbol-Index + symbolExists()
-//   Schneller Lookup: "existiert dieses Symbol schon?" → O(1)
-//   Duplikat-Erkennung für Optimizer und iterativen Plan-Aufbau.
-//
 // NEU (Punkt N): createValidationNode() + setValidationResult()
-//   Erzeugt nach einem H3-Node automatisch einen H4-Validierungs-Node.
+// NEU (Import):  import_strategy Feld + groupByBasename()
 
-#include "TaskNode.h"
+#include "Task/TaskNode.h"
 #include <QHash>
 #include <QSqlDatabase>
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QString>
 #include <QDebug>
+#include <QFileInfo>
 #include <vector>
 #include <functional>
 
@@ -37,17 +35,19 @@ public:
                          TaskScope      scope  = TaskScope::Internal,
                          int            order  = 0,
                          TaskNode      *parent = nullptr,
-                         const QString &symbol = {})
+                         const QString &symbol = {},
+                         ImportStrategy importStrategy = ImportStrategy::None)
     {
-        TaskNode *node    = new TaskNode();
-        node->id          = m_nextId++;
-        node->title       = title;
-        node->description = description;
-        node->level       = level;
-        node->scope       = scope;
-        node->order       = order;
-        node->symbol      = symbol;
-        node->dirty       = true;
+        TaskNode *node        = new TaskNode();
+        node->id              = m_nextId++;
+        node->title           = title;
+        node->description     = description;
+        node->level           = level;
+        node->scope           = scope;
+        node->order           = order;
+        node->symbol          = symbol;
+        node->importStrategy  = importStrategy;
+        node->dirty           = true;
 
         if (parent) {
             parent->addChild(node);
@@ -58,7 +58,6 @@ public:
 
         m_index[node->id] = node;
 
-        // Symbol-Index befüllen (NEU — Punkt H)
         if (!symbol.isEmpty())
             m_symbolIndex[symbol] = node->id;
 
@@ -66,20 +65,69 @@ public:
         return node;
     }
 
-    // ── Validierungs-Node erstellen (NEU — Punkt N) ───────────────────────────
-    // Erzeugt einen H4-Node als Kind des übergebenen H3-Nodes.
-    // Wird automatisch von AgentExecute nach handleExecuteCode() aufgerufen.
+    // ── Import: Gruppierung nach Basename (NEU) ───────────────────────────────
+    // Nach Phase 1 des Imports gruppiert LlamaQt automatisch H2-Nodes
+    // die den gleichen Datei-Basename haben unter einem H1-Parent.
     //
-    // Der Validierungs-Node bekommt:
-    //   title:       "Validierung: <H3-Titel>"
-    //   description: Was geprüft werden soll
-    //   level:       TaskLevel::Validation (4)
-    //   parent:      der H3-Node
+    // Beispiel:
+    //   Agent.h  + Agent.cpp  → H1: "Agent"  → [H2: Agent.h,  H2: Agent.cpp]
+    //   McpClient.h + McpClient.cpp → H1: "McpClient" → [...]
     //
-    // Warum als Kind des H3-Nodes statt als Geschwister?
-    //   Der H3-Node ist erst "wirklich Done" wenn seine Validierung grün ist.
-    //   Als Kind propagiert TaskStatus::Done nur wenn alle Kinder Done sind.
-    //   Das erzwingt die Validierung automatisch im Execute-Ablauf.
+    // Nodes die keinen Partner haben bleiben ohne H1 (direkt unter H0).
+    // H1-Nodes werden nur angelegt wenn es mindestens 2 Dateien mit gleichem
+    // Basename gibt (.h + .cpp ist der Normalfall).
+    //
+    // Ablauf:
+    //   1. Alle H2-Nodes sammeln
+    //   2. Nach QFileInfo::completeBaseName() gruppieren
+    //   3. Gruppen mit >1 Member: H1-Node anlegen, H2-Nodes umhängen
+    //   4. Gruppen mit 1 Member: unter H0 lassen (z.B. main.cpp ohne main.h)
+    //
+    // Analogie AVR: wie ein Linker der .o-Dateien zu Modulen gruppiert.
+    void groupByBasename(TaskNode *h0Root)
+    {
+        if (!h0Root) return;
+
+        // H2-Nodes sammeln (direkte Kinder von h0Root)
+        // Kopie weil wir children während der Iteration modifizieren
+        std::vector<TaskNode*> h2nodes;
+        for (TaskNode *child : h0Root->children) {
+            if (child->level == static_cast<int>(TaskLevel::Class))
+                h2nodes.push_back(child);
+        }
+
+        // Nach Basename gruppieren
+        // QMap statt QHash: deterministisch sortiert (alphabetisch)
+        QMap<QString, QVector<TaskNode*>> groups;
+        for (TaskNode *node : h2nodes) {
+            QString base = QFileInfo(node->title).completeBaseName();
+            groups[base].append(node);
+        }
+
+        // Gruppen mit >1 Member: H1-Node anlegen
+        int h1Order = 0;
+        for (auto it = groups.begin(); it != groups.end(); ++it) {
+            const QString &base  = it.key();
+            QVector<TaskNode*> &members = it.value();
+
+            if (members.size() < 2) continue; // Einzeldateien bleiben unter H0
+
+            // H1-Node anlegen
+            TaskNode *h1 = createNode(
+                base, "", static_cast<int>(TaskLevel::Files),
+                TaskScope::Internal, h1Order++, h0Root);
+
+            // H2-Nodes von H0 zu H1 umhängen
+            for (TaskNode *h2 : members) {
+                h0Root->removeChild(h2);
+                h1->addChild(h2);
+            }
+        }
+
+        m_dirty = true;
+    }
+
+    // ── Validierungs-Node erstellen (Punkt N) ─────────────────────────────────
     TaskNode *createValidationNode(TaskNode *implNode)
     {
         if (!implNode) return nullptr;
@@ -104,8 +152,8 @@ public:
             desc,
             static_cast<int>(TaskLevel::Validation),
             TaskScope::Internal,
-            implNode->order,  // gleiche Reihenfolge
-            implNode          // Kind des H3-Nodes
+            implNode->order,
+            implNode
         );
 
         return valNode;
@@ -138,23 +186,16 @@ public:
         for (TaskNode *root : m_roots) delete root;
         m_roots.clear();
         m_index.clear();
-        m_symbolIndex.clear();  // NEU
+        m_symbolIndex.clear();
         m_nextId = 1;
         m_dirty  = false;
     }
 
-    // ── Symbol-Lookup (NEU — Punkt H) ─────────────────────────────────────────
-    // Prüft ob ein Symbol bereits in einem Node implementiert wird.
-    // O(1) dank Hash-Index.
-    //
-    // Verwendung im iterativen Plan-Aufbau (Punkt G):
-    //   if (taskTree.symbolExists("Timer::start()"))
-    //       → dependsOn statt neue Implementierung
+    // ── Symbol-Lookup (Punkt H) ───────────────────────────────────────────────
     bool symbolExists(const QString &symbol) const {
         return !symbol.isEmpty() && m_symbolIndex.contains(symbol);
     }
 
-    // Gibt den Node zurück der das Symbol implementiert, oder nullptr.
     TaskNode *findBySymbol(const QString &symbol) const {
         if (symbol.isEmpty()) return nullptr;
         qint64 id = m_symbolIndex.value(symbol, -1);
@@ -162,14 +203,11 @@ public:
         return m_index.value(id, nullptr);
     }
 
-    // Symbol eines Nodes aktualisieren (z.B. nach Edit im Dialog)
     void setSymbol(TaskNode *node, const QString &symbol)
     {
         if (!node) return;
-        // Alten Symbol-Eintrag entfernen
         if (!node->symbol.isEmpty())
             m_symbolIndex.remove(node->symbol);
-        // Neuen Eintrag setzen
         node->symbol = symbol;
         if (!symbol.isEmpty())
             m_symbolIndex[symbol] = node->id;
@@ -178,7 +216,17 @@ public:
         m_dirty = true;
     }
 
-    // ── Validierungsergebnis setzen (NEU — Punkt N) ───────────────────────────
+    // ── Import-Strategie setzen (NEU) ─────────────────────────────────────────
+    void setImportStrategy(TaskNode *node, ImportStrategy strategy)
+    {
+        if (!node) return;
+        node->importStrategy = strategy;
+        node->dirty          = true;
+        node->updatedAt      = QDateTime::currentDateTime();
+        m_dirty = true;
+    }
+
+    // ── Validierungsergebnis setzen (Punkt N) ─────────────────────────────────
     void setValidationResult(TaskNode *node, const QString &result)
     {
         if (!node) return;
@@ -277,8 +325,6 @@ public:
         return m_index.value(id, nullptr);
     }
 
-    // nextPending überspringt Validierungs-Nodes NICHT —
-    // sie werden wie normale Nodes ausgeführt (der Prompt ist anders).
     TaskNode *nextPending() const {
         for (TaskNode *root : m_roots) {
             TaskNode *found = findNextPending(root);
@@ -287,7 +333,17 @@ public:
         return nullptr;
     }
 
-    // ── Symbol-Statistiken (für Debug/UI) ────────────────────────────────────
+    // NEU: nächster Pending-Node mit bestimmter Import-Strategie
+    // Wird von AgentImport::advanceImport() verwendet.
+    TaskNode *nextPendingImport() const {
+        for (TaskNode *root : m_roots) {
+            TaskNode *found = findNextPendingImport(root);
+            if (found) return found;
+        }
+        return nullptr;
+    }
+
+    // ── Symbol-Statistiken ────────────────────────────────────────────────────
     int symbolCount() const { return m_symbolIndex.size(); }
 
     QStringList allSymbols() const {
@@ -325,37 +381,40 @@ public:
         for (TaskNode *r : m_roots) delete r;
         m_roots.clear();
         m_index.clear();
-        m_symbolIndex.clear(); // NEU
+        m_symbolIndex.clear();
         m_nextId = 1;
 
         QSqlQuery q("SELECT id, parent_id, level, scope, `order`, insertion_idx, "
                     "title, description, symbol, result, side_output, build_prompt, "
-                    "validation_result, depends_on, status, created_at, updated_at "
+                    "validation_result, import_strategy, depends_on, status, "
+                    "created_at, updated_at "
                     "FROM tasks ORDER BY id", m_db);
 
         QHash<qint64, TaskNode*> loaded;
 
         while (q.next()) {
-            TaskNode *node      = new TaskNode();
-            node->id            = q.value(0).toLongLong();
-            qint64 parentId     = q.value(1).toLongLong();
-            node->level         = q.value(2).toInt();
-            node->scope         = TaskNode::scopeFromString(q.value(3).toString());
-            node->order         = q.value(4).toInt();
-            node->insertionIdx  = q.value(5).toInt();
-            node->title         = q.value(6).toString();
-            node->description   = q.value(7).toString();
-            node->symbol        = q.value(8).toString();   // NEU
-            node->result        = q.value(9).toString();
-            node->sideOutput    = q.value(10).toString();
-            node->buildPrompt   = q.value(11).toString();
-            node->validationResult = q.value(12).toString(); // NEU
-            node->status        = TaskNode::statusFromString(q.value(14).toString());
-            node->createdAt     = QDateTime::fromString(q.value(15).toString(), Qt::ISODate);
-            node->updatedAt     = QDateTime::fromString(q.value(16).toString(), Qt::ISODate);
-            node->dirty         = false;
+            TaskNode *node         = new TaskNode();
+            node->id               = q.value(0).toLongLong();
+            qint64 parentId        = q.value(1).toLongLong();
+            node->level            = q.value(2).toInt();
+            node->scope            = TaskNode::scopeFromString(q.value(3).toString());
+            node->order            = q.value(4).toInt();
+            node->insertionIdx     = q.value(5).toInt();
+            node->title            = q.value(6).toString();
+            node->description      = q.value(7).toString();
+            node->symbol           = q.value(8).toString();
+            node->result           = q.value(9).toString();
+            node->sideOutput       = q.value(10).toString();
+            node->buildPrompt      = q.value(11).toString();
+            node->validationResult = q.value(12).toString();
+            node->importStrategy   = TaskNode::importStrategyFromString(
+                                         q.value(13).toString()); // NEU
+            node->status           = TaskNode::statusFromString(q.value(15).toString());
+            node->createdAt        = QDateTime::fromString(q.value(16).toString(), Qt::ISODate);
+            node->updatedAt        = QDateTime::fromString(q.value(17).toString(), Qt::ISODate);
+            node->dirty            = false;
 
-            const QString depsStr = q.value(13).toString();
+            const QString depsStr = q.value(14).toString();
             if (!depsStr.isEmpty()) {
                 for (const QString &s : depsStr.split(',', Qt::SkipEmptyParts))
                     node->dependsOn.append(s.trimmed().toLongLong());
@@ -364,7 +423,7 @@ public:
             loaded[node->id]   = node;
             m_index[node->id]  = node;
             if (!node->symbol.isEmpty())
-                m_symbolIndex[node->symbol] = node->id; // NEU
+                m_symbolIndex[node->symbol] = node->id;
 
             if (node->id >= m_nextId) m_nextId = node->id + 1;
 
@@ -410,7 +469,7 @@ private:
     QSqlDatabase             m_db;
     std::vector<TaskNode*>   m_roots;
     QHash<qint64, TaskNode*> m_index;
-    QHash<QString, qint64>   m_symbolIndex; // NEU: Symbol → Node-ID
+    QHash<QString, qint64>   m_symbolIndex;
     qint64                   m_nextId;
     bool                     m_dirty = false;
 
@@ -447,6 +506,28 @@ private:
             return node;
         for (TaskNode *child : node->children) {
             TaskNode *found = findNextPending(child);
+            if (found) return found;
+        }
+        return nullptr;
+    }
+
+    // NEU: findet H2-Nodes mit import_strategy != None && Pending
+    // H3-Nodes werden von AgentImport selbst angelegt — nicht vorher suchen.
+    static TaskNode *findNextPendingImport(TaskNode *node)
+    {
+        if (!node) return nullptr;
+        if (node->status == TaskStatus::Done ||
+            node->status == TaskStatus::Skip) return nullptr;
+
+        // H2-Node mit Import-Strategie und Pending → das ist unser Kandidat
+        if (node->level == static_cast<int>(TaskLevel::Class) &&
+            node->status == TaskStatus::Pending &&
+            node->importStrategy != ImportStrategy::None &&
+            node->importStrategy != ImportStrategy::Skip)
+            return node;
+
+        for (TaskNode *child : node->children) {
+            TaskNode *found = findNextPendingImport(child);
             if (found) return found;
         }
         return nullptr;
@@ -494,6 +575,7 @@ private:
             "  side_output       TEXT,"
             "  build_prompt      TEXT,"
             "  validation_result TEXT,"
+            "  import_strategy   TEXT    DEFAULT 'none',"
             "  depends_on        TEXT,"
             "  status            TEXT    DEFAULT 'pending',"
             "  created_at        TEXT,"
@@ -502,7 +584,6 @@ private:
         );
 
         // ── Migration: neue Spalten für bestehende DBs ────────────────────
-        // Analogie AVR: Bootloader prüft Firmware-Version, lädt fehlende Teile.
         auto addColIfMissing = [&](const QString &col, const QString &type) {
             QSqlQuery check(m_db);
             check.exec(QString("SELECT %1 FROM tasks LIMIT 1").arg(col));
@@ -514,8 +595,9 @@ private:
         };
         addColIfMissing("side_output",       "TEXT");
         addColIfMissing("build_prompt",      "TEXT");
-        addColIfMissing("symbol",            "TEXT"); // NEU
-        addColIfMissing("validation_result", "TEXT"); // NEU
+        addColIfMissing("symbol",            "TEXT");
+        addColIfMissing("validation_result", "TEXT");
+        addColIfMissing("import_strategy",   "TEXT DEFAULT 'none'"); // NEU
 
         return true;
     }
@@ -529,27 +611,29 @@ private:
             "INSERT OR REPLACE INTO tasks "
             "(id, parent_id, level, scope, `order`, insertion_idx, "
             " title, description, symbol, result, side_output, build_prompt, "
-            " validation_result, depends_on, status, created_at, updated_at) "
+            " validation_result, import_strategy, depends_on, status, "
+            " created_at, updated_at) "
             "VALUES (:id,:pid,:lv,:sc,:ord,:ins,:ti,:desc,:sym,:res,"
-            "        :sout,:bprompt,:valres,:dep,:st,:cr,:up)"
+            "        :sout,:bprompt,:valres,:impstrat,:dep,:st,:cr,:up)"
         );
-        q.bindValue(":id",      node->id);
-        q.bindValue(":pid",     node->parent ? node->parent->id : qint64(-1));
-        q.bindValue(":lv",      node->level);
-        q.bindValue(":sc",      TaskNode::scopeName(node->scope));
-        q.bindValue(":ord",     node->order);
-        q.bindValue(":ins",     node->insertionIdx);
-        q.bindValue(":ti",      node->title);
-        q.bindValue(":desc",    node->description);
-        q.bindValue(":sym",     node->symbol);            // NEU
-        q.bindValue(":res",     node->result);
-        q.bindValue(":sout",    node->sideOutput);
-        q.bindValue(":bprompt", node->buildPrompt);
-        q.bindValue(":valres",  node->validationResult);  // NEU
-        q.bindValue(":dep",     depStrs.join(','));
-        q.bindValue(":st",      TaskNode::statusName(node->status));
-        q.bindValue(":cr",      node->createdAt.toString(Qt::ISODate));
-        q.bindValue(":up",      node->updatedAt.toString(Qt::ISODate));
+        q.bindValue(":id",       node->id);
+        q.bindValue(":pid",      node->parent ? node->parent->id : qint64(-1));
+        q.bindValue(":lv",       node->level);
+        q.bindValue(":sc",       TaskNode::scopeName(node->scope));
+        q.bindValue(":ord",      node->order);
+        q.bindValue(":ins",      node->insertionIdx);
+        q.bindValue(":ti",       node->title);
+        q.bindValue(":desc",     node->description);
+        q.bindValue(":sym",      node->symbol);
+        q.bindValue(":res",      node->result);
+        q.bindValue(":sout",     node->sideOutput);
+        q.bindValue(":bprompt",  node->buildPrompt);
+        q.bindValue(":valres",   node->validationResult);
+        q.bindValue(":impstrat", TaskNode::importStrategyToString(node->importStrategy)); // NEU
+        q.bindValue(":dep",      depStrs.join(','));
+        q.bindValue(":st",       TaskNode::statusName(node->status));
+        q.bindValue(":cr",       node->createdAt.toString(Qt::ISODate));
+        q.bindValue(":up",       node->updatedAt.toString(Qt::ISODate));
 
         if (!q.exec())
             qWarning() << "TaskTree::upsertNode:" << q.lastError().text();
