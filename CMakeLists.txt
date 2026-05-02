@@ -19,14 +19,9 @@ set(SOURCES
     src/main.cpp
     src/UI/MainWindow.cpp
 
-    # Agent — aufgeteilt in Teilklassen (Refactoring)
     src/Agent/Agent.cpp
     src/Agent/AgentChat.cpp
-    src/Agent/AgentPlan.cpp
-    src/Agent/AgentExecute.cpp
-    src/Agent/AgentAssemble.cpp
     src/Agent/AgentUtils.cpp
-    src/Agent/AgentImport.cpp
 
     src/Task/CommandProcessor.cpp
     src/AI/LlamaWorker.cpp
@@ -37,20 +32,13 @@ set(SOURCES
     src/Chat/ChatLogger.cpp
     src/UI/ConfigDialog.cpp
     src/UI/EditorDock.cpp
-    src/UI/PlannerDock.cpp
-    src/UI/TaskNodeDialog.cpp
 )
 
 set(HEADERS
     src/UI/MainWindow.h
     src/Agent/Agent.h
     src/Agent/AgentChat.h
-    src/Agent/AgentPlan.h
-    src/Agent/AgentExecute.h
-    src/Agent/AgentAssemble.h
     src/Agent/AgentUtils.h
-    src/Agent/AgentImport.h
-
     src/Task/CommandProcessor.h
     src/AI/LlamaWorker.h
     src/MCP/McpClient.h
@@ -60,17 +48,9 @@ set(HEADERS
     src/Chat/ChatLogger.h
     src/UI/ConfigDialog.h
     src/UI/EditorDock.h
-    src/UI/PlannerDock.h
-    src/Task/TaskNode.h
-    src/Task/TaskTree.h
-    src/Task/TaskTreeModel.h
-    src/UI/TaskNodeDialog.h
-    src/AI/ExecuteMemory.h
-    src/Task/CodeAssembler.h
-    src/UI/NodeGraphView.h
     src/Chat/ChatTemplate.h
-    src/UI/SearchBar.h
     src/Chat/ToolCallFormat.h
+    src/UI/SearchBar.h
 )
 
 add_executable(LlamaQt ${SOURCES} ${HEADERS}
@@ -79,6 +59,7 @@ add_executable(LlamaQt ${SOURCES} ${HEADERS}
 # ─── Include-Pfade ──────────────────────────────────────────────────────────
 target_include_directories(LlamaQt PRIVATE
     src/
+    src/UI
     ${LLAMA_INCLUDE_DIRS}
 )
 

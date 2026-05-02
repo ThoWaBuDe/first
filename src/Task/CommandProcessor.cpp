@@ -64,8 +64,8 @@ QString CommandProcessor::helpText()
         "  /run                 — cmake + make + Binary starten\n"
         "  /plan <Auftrag>      — Projekt analysieren + Aufgabenplan erstellen\n"
         "  /execute             — Execute-Modus starten\n"
-        "  /saveDB              — TaskTree + Thoughts in SQLite speichern\n"
-        "  /loadDB              — TaskTree + Thoughts aus SQLite laden\n"
+        "  /saveDB              — Noch nicht implementiert\n"
+        "  /loadDB              — Noch nicht implementiert\n"
         "  /import <pfad>       — Quellcode in Node-Struktur importieren\n"
         "  /summarize           — Konversation manuell zusammenfassen\n"
         "  /undo [Datei]        — letzten git-commit rückgängig\n"
@@ -114,7 +114,7 @@ CommandProcessor::ProcessResult CommandProcessor::handleSaveDB(const QStringList
     ProcessResult r;
     r.handled        = true;
     r.prompt         = "__SAVEDB__";
-    r.notice         = "→ /saveDB — TaskTree + Thoughts werden gespeichert...";
+    r.notice         = "→ /saveDB — noch nicht implementiert";
     r.noticeCssClass = "system";
     return r;
 }
@@ -125,7 +125,7 @@ CommandProcessor::ProcessResult CommandProcessor::handleLoadDB(const QStringList
     ProcessResult r;
     r.handled        = true;
     r.prompt         = "__LOADDB__";
-    r.notice         = "→ /loadDB — TaskTree + Thoughts werden geladen...";
+    r.notice         = "→ /loadDB — noch nicht implementiert";
     r.noticeCssClass = "system";
     return r;
 }

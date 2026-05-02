@@ -72,36 +72,6 @@ void AppConfig::load()
     m_chatLoggingEnabled = m_settings.value("chat_enabled", m_chatLoggingEnabled).toBool();
     m_chatLogDir         = m_settings.value("chat_log_dir", m_chatLogDir).toString();
     m_settings.endGroup();
-
-    const QString home = QDir::homePath();
-
-    m_settings.beginGroup("ProjectIndex");
-    m_indexSourceRoot  = "";
-    m_indexSandboxRoot = m_settings.value("sandbox_root", home + "/llamatools").toString();
-    m_indexCachePath   = m_settings.value("cache_path",
-                         home + "/.cache/llamaqt/index.md").toString();
-    m_indexAutoRebuild = m_settings.value("auto_rebuild", true).toBool();
-    m_settings.endGroup();
-
-    m_settings.beginGroup("TaskTree");
-    m_taskDbPath = m_settings.value("db_path",
-                   home + "/llamatools/tasks.sqlite").toString();
-    m_settings.endGroup();
-
-    m_settings.beginGroup("Execute");
-    m_executeMemoryMaxEntries = m_settings.value("memory_max_entries",
-                                m_executeMemoryMaxEntries).toInt();
-    m_executeAutoMode         = m_settings.value("auto_mode",
-                                m_executeAutoMode).toBool();
-    m_executeSandboxProject   = m_settings.value("sandbox_project",
-                                m_executeSandboxProject).toString();
-    m_assembleOnlyDone        = m_settings.value("assemble_only_done",
-                                m_assembleOnlyDone).toBool();
-    m_debugExecute            = m_settings.value("debug_execute",
-                                m_debugExecute).toBool();
-    m_debugLogDir             = m_settings.value("debug_log_dir",
-                                m_debugLogDir).toString();
-    m_settings.endGroup();
 }
 
 void AppConfig::save()
@@ -149,26 +119,6 @@ void AppConfig::save()
     m_settings.beginGroup("Logging");
     m_settings.setValue("chat_enabled", m_chatLoggingEnabled);
     m_settings.setValue("chat_log_dir", m_chatLogDir);
-    m_settings.endGroup();
-
-    m_settings.beginGroup("ProjectIndex");
-    m_settings.setValue("source_root",  m_indexSourceRoot);
-    m_settings.setValue("sandbox_root", m_indexSandboxRoot);
-    m_settings.setValue("cache_path",   m_indexCachePath);
-    m_settings.setValue("auto_rebuild", m_indexAutoRebuild);
-    m_settings.endGroup();
-
-    m_settings.beginGroup("TaskTree");
-    m_settings.setValue("db_path", m_taskDbPath);
-    m_settings.endGroup();
-
-    m_settings.beginGroup("Execute");
-    m_settings.setValue("memory_max_entries", m_executeMemoryMaxEntries);
-    m_settings.setValue("auto_mode",          m_executeAutoMode);
-    m_settings.setValue("sandbox_project",    m_executeSandboxProject);
-    m_settings.setValue("assemble_only_done", m_assembleOnlyDone);
-    m_settings.setValue("debug_execute",      m_debugExecute);
-    m_settings.setValue("debug_log_dir",      m_debugLogDir);
     m_settings.endGroup();
 
     m_settings.sync();

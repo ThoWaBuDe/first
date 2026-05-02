@@ -38,26 +38,9 @@ void MainWindow::setupUi()
     addDockWidget(Qt::BottomDockWidgetArea, m_editorDock);
     m_editorDock->hide();
 
-    // ─── Planner-Dock (links) ─────────────────────────────────────────────
-    // Zeigt den TaskTree + Approval-Buttons im Plan-Modus.
-    // Initial ausgeblendet — wird durch Agent::modeChanged(Plan) eingeblendet.
-    //
-    // Warum links?
-    //   - Rechts ist toolDock (Tool-Calls, Thinking)
-    //   - Unten ist editorDock (Code-Editor)
-    //   - Links ist noch frei → natürliche Position für Navigation/Plan
-    //
-    // Warum nicht tabbedDock mit toolDock?
-    //   Plan und Tool-Calls sollen gleichzeitig sichtbar sein:
-    //   User sieht links den Plan-Tree, rechts die laufenden Tool-Calls.
-    m_plannerDock = new PlannerDock(m_agent, this);
-    addDockWidget(Qt::LeftDockWidgetArea, m_plannerDock);
-    m_plannerDock->hide();   // initial ausgeblendet
-
     // ─── Ansicht-Menü: alle Docks togglebar ───────────────────────────────
     QMenu *viewMenu = menuBar()->addMenu("&Ansicht");
     viewMenu->addAction(m_editorDock->toggleViewAction());
-    viewMenu->addAction(m_plannerDock->toggleViewAction());
     // toggleViewAction() liefert eine QAction die den Dock ein-/ausblendet.
     // Qt erstellt sie automatisch für jeden QDockWidget.
 
@@ -113,32 +96,6 @@ void MainWindow::setupUi()
     QAction *quitAction = fileMenu->addAction("Beenden");
     quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, this, &QMainWindow::close);
-
-    // NodeGraphView — initial versteckt, togglebar über Ansicht-Menü
-    m_graphView = new NodeGraphView(this);
-    addDockWidget(Qt::RightDockWidgetArea, m_graphView);
-    //m_graphView->hide();
-
-    connect(m_graphView, &QDockWidget::visibilityChanged,
-            this, [this](bool visible) {
-                if (visible)
-                    m_graphView->refresh(m_agent->taskTree());
-            });
-
-
-    // Im Ansicht-Menü eintragen
-    viewMenu->addAction(m_graphView->toggleViewAction());
-
-    // Graph aktualisieren wenn TaskTree sich ändert
-    connect(m_agent, &Agent::taskTreeUpdated,
-            this,    &MainWindow::onRefreshGraph);
-
-    // Node selektiert → PlannerDock synchronisieren (optional)
-    connect(m_graphView, &NodeGraphView::nodeSelected,
-            this, [this](qint64 nodeId) {
-                // TODO: PlannerDock auf diesen Node scrollen
-                Q_UNUSED(nodeId)
-            });
 
     // ─── SearchBar ────────────────────────────────────────────────────────────
     // Eine SearchBar Instanz für alle TextEdits.
@@ -207,8 +164,6 @@ void MainWindow::setupConnections()
             this,    &MainWindow::onStatsUpdated);
 
     // ─── Modus-Änderung ────────────────────────────────────────────────────
-    connect(m_agent, &Agent::modeChanged,
-            this,    &MainWindow::onModeChanged);
 
     // ─── EditorDock ───────────────────────────────────────────────────────
     connect(m_editorDock, &EditorDock::fileSavedByUser,
@@ -248,30 +203,6 @@ void MainWindow::onSendClicked()
 void MainWindow::onClearToolsClicked()
 {
     ui->toolView->clear();
-}
-
-// ─── onModeChanged ───────────────────────────────────────────────────────────
-// Reagiert auf Modus-Wechsel des Agent.
-// Plan-Modus → PlannerDock einblenden
-// Chat-Modus → PlannerDock ausblenden (optional: User kann es offen lassen)
-//
-// Warum nur einblenden, nicht erzwungen ausblenden?
-//   User könnte den Plan-Tree auch nach der Approval noch sehen wollen
-//   (z.B. um den bestätigten Plan nachzulesen).
-//   Wir blenden nur im Plan-Modus automatisch ein.
-void MainWindow::onModeChanged(AgentMode mode)
-{
-    if (mode == AgentMode::Plan) {
-        m_plannerDock->show();
-        m_plannerDock->raise();
-    }
-    // Bei Chat/Execute: Dock bleibt wie es ist (User entscheidet)
-}
-
-void MainWindow::onRefreshGraph()
-{
-    if (m_graphView && m_graphView->isVisible())
-        m_graphView->refresh(m_agent->taskTree());
 }
 
 void MainWindow::onSearchRequested()
@@ -337,8 +268,7 @@ void MainWindow::onInputEnabled(bool enabled)
 
     // Stop-Button: aktiv wenn generiert wird ODER im Execute/Plan-Modus
     // (zwischen zwei Nodes ist m_generating kurz false, aber der Modus bleibt)
-    bool agentBusy = (m_agent->mode() == AgentMode::Execute ||
-                      m_agent->mode() == AgentMode::Plan);
+    bool agentBusy = false;
     ui->stopButton->setEnabled(!enabled || agentBusy);
 
     if (enabled)

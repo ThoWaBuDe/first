@@ -12,13 +12,8 @@ sudo apt install qt6-base-dev cmake build-essential
 ## Build
 
 ```bash
-mkdir -p ~/llamaqt/build && cd ~/llamaqt/build
-
-cmake .. \
-  -DLLAMA_BUILD_DIR=$HOME/ai/qLP/build \
-  -DLLAMA_SRC_DIR=$HOME/ai/qLP \
-  -DCMAKE_BUILD_TYPE=Release
-
+mkdir -p ~/ai/LlamaQT/build && cd ~/ai/LlamaQT/build
+cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
 
@@ -41,13 +36,12 @@ Einstellungen unter `Datei → Einstellungen` (Ctrl+,) oder direkt in:
 ```
 
 Konfigurierbar: Modellpfad, Sampler-Parameter, Context-Größe,
-Chat-Template, Deadlock-Schwellen, Logging, Tavily API Key.
+Chat-Template, Tool-Call-Format, Deadlock-Schwellen, Logging.
 
 ## Tool-Sandbox
 
 Das Modell kann nur auf `~/llamatools/` zugreifen.
 Symlinks werden auf jedem Pfad-Level geprüft (kein Sandbox-Escape).
-Absolute Pfade werden abgelehnt.
 
 ```bash
 mkdir ~/llamatools
@@ -55,15 +49,15 @@ mkdir ~/llamatools
 
 ## Slash-Kommandos
 
-| Kommando              | Aktion                                              |
-|-----------------------|-----------------------------------------------------|
-| `/init [Projektname]` | Verzeichnis + Git-Repo + AGENT.md anlegen           |
-| `/build`              | cmake configure + make (3x Retry)                  |
-| `/compile`            | nur make (kein Re-Configure)                        |
-| `/run`                | cmake + make + Binary starten                       |
-| `/summarize`          | Konversation manuell zusammenfassen                 |
-| `/undo [Datei]`       | letzten git-commit rückgängig                       |
-| `/diff`               | git diff anzeigen                                   |
+| Kommando              | Aktion                                    |
+|-----------------------|-------------------------------------------|
+| `/init [Projektname]` | Verzeichnis + Git-Repo + AGENT.md anlegen |
+| `/build`              | cmake configure + make                    |
+| `/compile`            | nur make                                  |
+| `/run`                | cmake + make + Binary starten             |
+| `/summarize`          | Konversation manuell zusammenfassen       |
+| `/undo [Datei]`       | letzten git-commit rückgängig             |
+| `/diff`               | git diff anzeigen                         |
 
 ## Eingabe
 
@@ -77,9 +71,11 @@ GUI-Thread                          Worker-Thread
 ──────────────────────────────────  ──────────────────────────
 MainWindow (View/MVP)               LlamaWorker (Active Object)
   └── Agent (Presenter/MVP)           ├── llama_model*
-        ├── ChatModel                 ├── llama_context*
-        ├── McpManager                ├── llama_sampler* Chat
-        │     └── McpClient(s)        └── llama_sampler* Tool
+        ├── AgentChat                 ├── llama_context*
+        ├── AgentUtils                ├── llama_sampler* Chat
+        ├── ChatModel                 └── llama_sampler* Tool
+        ├── McpManager
+        │     └── McpClient(s)
         ├── CommandProcessor
         ├── ChatLogger
         └── AppConfig (Singleton)
@@ -103,44 +99,37 @@ Patterns:
 
 ## MCP-Server
 
-| Server     | Version | Tools                                                      |
-|------------|---------|------------------------------------------------------------|
-| filesystem | v2.3    | read/write/append/str_replace/patch, list_dir, list_symbols|
-|            |         | mkdir, grep_code, search_code, tree, find_files            |
-|            |         | read_multiple_files, move_file, copy_file                  |
-|            |         | git_status/diff/log/checkout                               |
-| sysinfo    | v2.0    | get_time, get_pwd, disk_free, sys_info                     |
-|            |         | gpu_info, set_power_limit                                  |
-| compile    | v2.0    | cmake_build (3x Retry), pkg_status, check_run              |
-| websearch  | v1.1    | web_search (Tavily API)                                    |
+| Server      | Tools (Auswahl)                                        |
+|-------------|--------------------------------------------------------|
+| filesystem  | read/write/str_replace, list_dir, grep_code, git_*     |
+| sysinfo     | get_time, sys_info, gpu_info, set_power_limit          |
+| compile     | cmake_build, check_run                                 |
+| websearch   | web_search (Tavily API)                                |
+| tree-sitter | list_symbols, get_function_body, replace_symbol        |
+| clang       | find_references, rename_symbol, type_errors, go_to_def |
+
+## Tool-Call-Format
+
+Automatische Erkennung aus GGUF-Template + Modell-Dateiname.
+Unterstützt: Qwen XML Tags, Mistral Native, Gemma4/Google,
+Llama3 Tool-Use, Generic.
 
 ## Sampler-Profile
 
-| Profil | Top-K | Temp | Top-P | Min-P | Seed         |
-|--------|-------|------|-------|-------|--------------|
-| Chat   | 40    | 0.7  | 0.95  | 0.05  | /dev/urandom |
-| Tool   | 20    | 0.1  | 0.50  | 0.05  | /dev/urandom |
+| Profil | Top-K | Temp | Verwendung      |
+|--------|-------|------|-----------------|
+| Chat   | 40    | 0.7  | Konversation    |
+| Tool   | 20    | 0.1  | JSON Tool-Calls |
 
-Seed wird vor **jeder** Generation neu gezogen — kein deterministischer Loop.
-
-## KV-Cache
-
-```cpp
-ctxParams.type_k = GGML_TYPE_Q8_0;
-ctxParams.type_v = GGML_TYPE_Q8_0;
-ctxParams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-```
-
-Qwen3.5 hat hybride Architektur (Transformer + Recurrent/SSM-Layer).
-Recurrent-Layer brauchen keinen KV-Cache → reduzierter VRAM-Verbrauch.
+Seed wird vor **jeder** Generation neu aus /dev/urandom gezogen.
 
 ## Deadlock-Erkennung
 
-| Fehlerzahl | Eskalation                                    |
-|------------|-----------------------------------------------|
-| 3          | Warnung — LLM zur Überprüfung auffordern      |
-| 5          | Umleitung — anderen Weg suchen                |
-| 7          | Abbruch — LLM erklärt dem Nutzer den Fehler   |
+| Fehlerzahl | Eskalation                               |
+|------------|------------------------------------------|
+| 3          | Warnung — LLM zur Überprüfung auffordern |
+| 5          | Umleitung — anderen Weg suchen           |
+| 7          | Abbruch — LLM erklärt den Fehler         |
 
 ## Code-Editor
 
@@ -153,3 +142,8 @@ EditorDock: andockbares Fenster mit C++ Syntax-Highlighting.
 
 Konversation wird in `~/llamatools/chat_log/` als Markdown gespeichert.
 Aktivierbar in Einstellungen → Logging.
+
+## Hardware-Anforderungen
+
+Getestet mit: RTX 4000 SFF Ada (20GB VRAM), Ryzen 5 5600x, 48GB RAM.
+Empfohlene Modelle: Qwen3.5-9B-Q6_K, Qwen3.6-27B-Q4_K_M, Devstral-Small-2-24B.

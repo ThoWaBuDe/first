@@ -1,28 +1,12 @@
 #include "Agent/Agent.h"
 #include "Agent/AgentChat.h"
-#include "Agent/AgentPlan.h"
-#include "Agent/AgentExecute.h"
-#include "Agent/AgentAssemble.h"
 #include "Agent/AgentUtils.h"
-#include "Agent/AgentImport.h"   // NEU
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QMetaObject>
 #include <QFileInfo>
 #include <QDir>
-
-const QStringList Agent::PLAN_ALLOWED_TOOLS = {
-    "read_file", "list_dir", "get_symbol", "get_project_index",
-    "rebuild_index", "get_time", "sys_info", "disk_free", "get_pwd",
-};
-
-const QStringList Agent::EXECUTE_ALLOWED_TOOLS = {
-    "read_file", "list_dir", "get_symbol", "get_project_index",
-    "get_function_body", "get_class_members", "get_includes",
-    "check_syntax", "read_multiple_files", "grep_code", "search_code",
-    "web_search", "get_time", "sys_info", "get_pwd", "disk_free",
-};
 
 Agent::Agent(const QString &modelPath, QObject *parent)
     : QObject(parent)
@@ -31,11 +15,7 @@ Agent::Agent(const QString &modelPath, QObject *parent)
     , m_mcp(this)
     , m_commands(this)
 {
-    m_chat     = new AgentChat(*this);
-    m_plan     = new AgentPlan(*this);
-    m_execute  = new AgentExecute(*this);
-    m_assemble = new AgentAssemble(*this);
-    m_import   = new AgentImport(*this);   // NEU
+    m_chat = new AgentChat(*this);
 
     m_worker = new LlamaWorker();
     m_worker->moveToThread(&m_workerThread);
@@ -93,10 +73,6 @@ Agent::~Agent()
     m_workerThread.quit();
     m_workerThread.wait(3000);
     delete m_chat;
-    delete m_plan;
-    delete m_execute;
-    delete m_assemble;
-    delete m_import;   // NEU
 }
 
 void Agent::start()
@@ -110,10 +86,6 @@ void Agent::start()
 
     connect(&cfg, &AppConfig::chatLoggingChanged,
             &m_logger, &ChatLogger::setEnabled);
-
-    QString dbPath = cfg.taskDbPath();
-    QDir().mkpath(QFileInfo(dbPath).absolutePath());
-    m_taskTree.setDbPath(dbPath);
 
     QString binDir = QCoreApplication::applicationDirPath();
     m_mcp.addServer(binDir + "/mcp-servers/filesystem/llamaqt-filesystem");
@@ -149,8 +121,7 @@ void Agent::applyChatTemplate()
         tmpl = ChatTemplate::forPreset(m_detectedPreset);
     } else if (preset == ChatTemplate::Preset::Custom) {
         emit appendTools(
-            "Custom Chat-Template: Parsing noch nicht implementiert — Fallback ChatML.",
-            "system");
+            "Custom Chat-Template: Fallback ChatML.", "system");
         tmpl = ChatTemplate::chatML();
     } else {
         tmpl = ChatTemplate::forPreset(preset);
@@ -165,7 +136,7 @@ void Agent::onChatTemplateDetected(const QString &jinjaTemplate,
     m_detectedPreset = detectedPreset;
     applyChatTemplate();
 
-    QString presetName  = ChatTemplate::presetName(detectedPreset);
+    QString presetName   = ChatTemplate::presetName(detectedPreset);
     ChatTemplate::Preset userChoice = AppConfig::instance().chatTemplatePreset();
 
     if (jinjaTemplate.isEmpty()) {
@@ -193,12 +164,8 @@ void Agent::onToolFormatDetected(ToolCallFormat::Preset detectedFormat,
     AppConfig &cfg = AppConfig::instance();
     ToolCallFormat::Preset userChoice = cfg.toolCallFormatPreset();
 
-    ToolCallFormat::Preset effective;
-    if (userChoice == ToolCallFormat::Preset::Auto) {
-        effective = detectedFormat;
-    } else {
-        effective = userChoice;
-    }
+    ToolCallFormat::Preset effective =
+        (userChoice == ToolCallFormat::Preset::Auto) ? detectedFormat : userChoice;
 
     m_activeToolFormat = effective;
     cfg.setEffectiveToolCallFormat(effective);
@@ -206,7 +173,6 @@ void Agent::onToolFormatDetected(ToolCallFormat::Preset detectedFormat,
     m_chatModel.setSystemPrompt(buildFullSystemPrompt());
 
     QString effectiveName = ToolCallFormat::presetName(effective);
-
     if (userChoice == ToolCallFormat::Preset::Auto) {
         emit appendTools(
             QString("Tool-Format (Auto via %1): <b>%2</b>")
@@ -242,78 +208,28 @@ void Agent::onUserMessage(const QString &text)
                 m_chat->summarizeContext();
                 return;
             }
-            if (result.prompt.startsWith("__PLAN__:")) {
-                QString auftrag = result.prompt.mid(9);
-                emit appendChat(
-                    QString("<b>Plan-Modus:</b> %1").arg(text.toHtmlEscaped()), "user");
-                m_plan->startPlan(auftrag);
-                return;
-            }
-            if (result.prompt == "__EXECUTE__") {
-                if (m_taskTree.isEmpty()) {
-                    emit appendTools("Kein Plan geladen.", "error");
-                    emit inputEnabled(true);
-                    return;
-                }
-                if (m_taskTree.nextPending() == nullptr) {
-                    emit appendTools("Alle Nodes bereits erledigt.", "system");
-                    emit inputEnabled(true);
-                    return;
-                }
-                emit appendChat("<b>[System]</b> Execute-Modus gestartet.", "system");
-                m_execute->startExecute();
-                return;
-            }
-            if (result.prompt == "__SAVEDB__") {
-                bool ok1 = m_taskTree.save();
-                bool ok2 = m_executeMemory.save();
-                if (ok1 && ok2) {
-                    emit appendTools(
-                        QString("<b>DB gespeichert:</b> %1 Nodes, %2 Thoughts")
-                        .arg(m_taskTree.nodeCount())
-                        .arg(m_executeMemory.count()), "system");
-                } else {
-                    emit appendTools("<b>Fehler beim Speichern der DB.</b>", "error");
-                }
+
+            // Plan/Execute/Import — noch nicht implementiert
+            if (result.prompt.startsWith("__PLAN__:") ||
+                result.prompt == "__EXECUTE__"         ||
+                result.prompt.startsWith("__IMPORT__:")) {
+                emit appendTools(
+                    "<b>Hinweis:</b> Dieser Modus ist noch nicht implementiert.",
+                    "system");
                 emit inputEnabled(true);
                 return;
             }
-            if (result.prompt == "__LOADDB__") {
-                bool ok1 = m_taskTree.load();
-                bool ok2 = m_executeMemory.load();
-                if (ok1) {
-                    emit taskTreeUpdated();
-                    emit appendTools(
-                        QString("<b>DB geladen:</b> %1 Nodes, %2 Thoughts")
-                        .arg(m_taskTree.nodeCount())
-                        .arg(m_executeMemory.count()), "system");
-                } else {
-                    emit appendTools("<b>Fehler beim Laden der DB.</b>", "error");
-                }
+
+            if (result.prompt == "__SAVEDB__" ||
+                result.prompt == "__LOADDB__" ||
+                result.prompt == "__CODEASSEMBLE__") {
+                emit appendTools(
+                    "<b>Hinweis:</b> Datenbank-Funktionen nicht verfügbar.",
+                    "system");
                 emit inputEnabled(true);
                 return;
             }
-            if (result.prompt == "__CODEASSEMBLE__") {
-                if (m_taskTree.isEmpty()) {
-                    emit appendTools("Kein Plan geladen.", "error");
-                    emit inputEnabled(true);
-                    return;
-                }
-                m_assemble->assembleProject();
-                emit inputEnabled(true);
-                return;
-            }
-            // NEU: /import → AgentImport (nicht mehr AgentChat)
-            if (result.prompt.startsWith("__IMPORT__:")) {
-                QString importPath = result.prompt.mid(11);
-                emit appendChat(
-                    QString("<b>Import:</b> %1").arg(importPath.toHtmlEscaped()),
-                    "user");
-                m_mode = AgentMode::Plan;
-                emit modeChanged(m_mode);
-                m_import->startImport(importPath);
-                return;
-            }
+
             if (result.prompt.isEmpty()) return;
 
             emit appendChat(
@@ -358,22 +274,12 @@ void Agent::onStop()
 {
     ++m_sessionId;
     m_generating        = false;
-    m_updatingThoughts  = false;
     m_continuationCount = 0;
     m_pendingToolCalls.clear();
     m_pendingToolIdx = 0;
 
     if (m_worker) m_worker->stopGeneration();
     m_toolFailCount.clear();
-
-    if (m_mode == AgentMode::Execute || m_mode == AgentMode::Plan) {
-        if (m_currentNode && m_currentNode->status == TaskStatus::Running) {
-            m_taskTree.setStatus(m_currentNode, TaskStatus::Pending);
-            m_taskTree.save();
-            emit taskTreeUpdated();
-        }
-        m_currentNode = nullptr;
-    }
 
     m_mode = AgentMode::Chat;
     emit modeChanged(m_mode);
@@ -387,17 +293,10 @@ void Agent::onClearChat()
 {
     ++m_sessionId;
     m_generating        = false;
-    m_updatingThoughts  = false;
     m_pendingToolCalls.clear();
     m_pendingToolIdx = 0;
 
     if (m_worker) m_worker->stopGeneration();
-
-    if (m_currentNode && m_currentNode->status == TaskStatus::Running) {
-        m_taskTree.setStatus(m_currentNode, TaskStatus::Pending);
-        m_taskTree.save();
-    }
-    m_currentNode = nullptr;
 
     m_mode = AgentMode::Chat;
     emit modeChanged(m_mode);
@@ -412,14 +311,12 @@ void Agent::onClearChat()
     m_totalTokens       = 0;
     m_promptTokens      = 0;
     m_toolFailCount.clear();
-    m_planRetryCount    = 0;
     m_continuationCount = 0;
 
     emit appendChat("Chat gelöscht.", "system");
     m_chat->emitStats();
     emit inputEnabled(true);
     emit statusChanged("Bereit");
-    emit taskTreeUpdated();
 }
 
 void Agent::onFileSavedByUser(const QString &filePath)
@@ -431,27 +328,6 @@ void Agent::onFileSavedByUser(const QString &filePath)
     m_chatModel.addToolResult("editor_notify",
         QString("[User hat '%1' manuell bearbeitet und gespeichert. "
                 "Bitte read_file aufrufen bevor du str_replace verwendest.]").arg(name));
-}
-
-void Agent::onPlanApproved()
-{
-    if (m_mode != AgentMode::Plan) return;
-    m_taskTree.save();
-    emit appendTools(
-        QString("<b>Plan gespeichert:</b> %1 Knoten").arg(m_taskTree.nodeCount()),
-        "system");
-    m_execute->startExecute();
-}
-
-void Agent::onPlanRejected()
-{
-    if (m_mode != AgentMode::Plan) return;
-    m_mode = AgentMode::Chat;
-    emit modeChanged(m_mode);
-    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
-    emit appendChat("<b>[System]</b> Plan abgelehnt.", "system");
-    emit inputEnabled(true);
-    emit statusChanged("Bereit");
 }
 
 void Agent::onModelLoaded()
@@ -486,11 +362,9 @@ void Agent::onStatsUpdate(int promptTokens, int ctxSize)
 void Agent::onError(const QString &error)
 {
     m_generating = false;
-    if (m_mode == AgentMode::Plan) {
-        m_mode = AgentMode::Chat;
-        emit modeChanged(m_mode);
-        m_chatModel.setSystemPrompt(buildFullSystemPrompt());
-    }
+    m_mode = AgentMode::Chat;
+    emit modeChanged(m_mode);
+    m_chatModel.setSystemPrompt(buildFullSystemPrompt());
     emit inputEnabled(true);
     emit appendTools(
         QString("Fehler: %1").arg(error.toHtmlEscaped()), "error");
@@ -506,7 +380,6 @@ void Agent::onTokenReceived(const QString &token)
     if (m_generatedTokens % 10 == 0) m_chat->emitStats();
 }
 
-// ─── onGenerationDone ─────────────────────────────────────────────────────────
 void Agent::onGenerationDone(const QString &fullResponse)
 {
     m_generating = false;
@@ -521,126 +394,7 @@ void Agent::onGenerationDone(const QString &fullResponse)
         return ToolCallFormat::isCompleteToolCall(fullResponse, m_activeToolFormat);
     };
 
-    // ── Thoughts-Update ───────────────────────────────────────────────────
-    if (m_updatingThoughts) {
-        m_updatingThoughts = false;
-        m_executeMemory.parseFromLlmOutput(fullResponse);
-        m_executeMemory.save();
-        emit appendTools(
-            QString("<b>Thoughts aktualisiert:</b> %1 Einträge.")
-            .arg(m_executeMemory.count()), "system");
-        m_execute->advanceExecute();
-        return;
-    }
-
-    // ── Import-Modus (NEU) ────────────────────────────────────────────────
-    // Import läuft im Plan-Modus, aber m_import->isImportMode() unterscheidet
-    // ihn vom normalen /plan-Befehl.
-    if (m_import->isImportMode()) {
-        if (hasToolCall() && isComplete()) {
-            m_chatModel.addAssistantMessage(fullResponse);
-            m_import->handleImportToolCall(fullResponse, mySession);
-            return;
-        }
-        if (hasToolCall() && !isComplete()) {
-            ++m_continuationCount;
-            if (m_continuationCount > MAX_CONTINUATIONS) {
-                m_continuationCount = 0;
-                emit appendTools(
-                    "Import: Tool-Call unvollständig — nächste Datei.", "error");
-                if (m_currentNode) {
-                    m_taskTree.setStatus(m_currentNode, TaskStatus::Failed);
-                    m_taskTree.save();
-                    emit taskTreeUpdated();
-                    m_currentNode = nullptr;
-                }
-                m_import->advanceImport();
-                return;
-            }
-            m_chatModel.addAssistantMessage(fullResponse);
-            m_generating      = true;
-            m_generatedTokens = 0;
-            startGeneration(LlamaWorker::SamplerProfile::Tool);
-            return;
-        }
-        // Kein Tool-Call → Ergebnis verarbeiten (plan_done o.ä.)
-        m_continuationCount = 0;
-        m_import->handleImportResult(fullResponse, mySession);
-        return;
-    }
-
-    // ── Plan-Modus ────────────────────────────────────────────────────────
-    if (m_mode == AgentMode::Plan) {
-        if (fullResponse.contains("<plan>") && fullResponse.contains("</plan>")) {
-            m_plan->handlePlanJson(fullResponse, mySession);
-            return;
-        }
-        if (hasToolCall() && isComplete()) {
-            m_chatModel.addAssistantMessage(fullResponse);
-            m_plan->handlePlanToolCall(fullResponse, mySession);
-            return;
-        }
-        if (hasToolCall() && !isComplete()) {
-            ++m_continuationCount;
-            if (m_continuationCount > MAX_CONTINUATIONS) {
-                m_continuationCount = 0;
-                emit appendTools("Plan: Tool-Call unvollständig — abgebrochen.", "error");
-                m_mode = AgentMode::Chat;
-                emit modeChanged(m_mode);
-                m_chatModel.setSystemPrompt(buildFullSystemPrompt());
-                emit inputEnabled(true);
-                emit statusChanged("Bereit");
-                return;
-            }
-            m_chatModel.addAssistantMessage(fullResponse);
-            m_generating      = true;
-            m_generatedTokens = 0;
-            startGeneration(LlamaWorker::SamplerProfile::Tool);
-            return;
-        }
-        m_chatModel.addAssistantMessage(fullResponse);
-        m_generating      = true;
-        m_generatedTokens = 0;
-        m_currentResponse.clear();
-        m_thinkBuffer.clear();
-        m_inThinkBlock = false;
-        emit appendChat("<b>Assistent:</b> ", "assistant");
-        startGeneration(LlamaWorker::SamplerProfile::Chat);
-        return;
-    }
-
-    // ── Execute-Modus ─────────────────────────────────────────────────────
-    if (m_mode == AgentMode::Execute) {
-        if (m_execute->isExecuteToolCall(fullResponse)) {
-            m_chatModel.addAssistantMessage(fullResponse);
-            m_execute->handleExecuteToolCall(fullResponse, mySession);
-            return;
-        }
-        if (hasToolCall() && !isComplete()) {
-            ++m_continuationCount;
-            if (m_continuationCount > MAX_CONTINUATIONS) {
-                m_continuationCount = 0;
-                emit appendTools("Execute: Tool-Call unvollständig — Node als Failed.", "error");
-                if (m_currentNode) {
-                    m_taskTree.setStatus(m_currentNode, TaskStatus::Failed);
-                    m_taskTree.save();
-                    emit taskTreeUpdated();
-                }
-                m_execute->advanceExecute();
-                return;
-            }
-            m_chatModel.addAssistantMessage(fullResponse);
-            m_generating = true;
-            m_generatedTokens = 0;
-            startGeneration(LlamaWorker::SamplerProfile::Tool);
-            return;
-        }
-        m_continuationCount = 0;
-        m_execute->handleExecuteCode(fullResponse, mySession);
-        return;
-    }
-
-    // ── Chat-Modus ────────────────────────────────────────────────────────
+    // ── Summarize ─────────────────────────────────────────────────────────
     if (m_summarizing) {
         m_summarizing = false;
         m_chatModel.clear();
@@ -657,6 +411,7 @@ void Agent::onGenerationDone(const QString &fullResponse)
         return;
     }
 
+    // ── Unvollständiger Tool-Call → Continuation ──────────────────────────
     if (hasToolCall() && !isComplete()) {
         ++m_continuationCount;
         if (m_continuationCount > MAX_CONTINUATIONS) {
@@ -680,12 +435,14 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     m_continuationCount = 0;
 
+    // ── Vollständiger Tool-Call ────────────────────────────────────────────
     if (hasToolCall() && isComplete()) {
         m_chatModel.addAssistantMessage(fullResponse);
         m_chat->handleToolCall(fullResponse, mySession);
         return;
     }
 
+    // ── Normale Antwort ───────────────────────────────────────────────────
     m_chatModel.addAssistantMessage(fullResponse);
     m_logger.logAssistant(fullResponse);
     emit inputEnabled(true);

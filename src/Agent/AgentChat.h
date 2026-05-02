@@ -27,8 +27,7 @@ public:
     // Kontext-Auslastung prüfen
     void checkContextUsage();
 
-    // NEU: /import Command — Quellcode → Nodes
-    void handleImport(const QString &path);
+    
 
 private:
     Agent &m_agent;

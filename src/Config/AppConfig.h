@@ -1,9 +1,10 @@
 #pragma once
+#include "Chat/ToolCallFormat.h"
+#include "Chat/ChatTemplate.h"
 #include <QObject>
 #include <QString>
 #include <QSettings>
 #include "Chat/ChatTemplate.h"
-#include "Chat/ToolCallFormat.h"
 
 // ─── AppConfig ────────────────────────────────────────────────────────────────
 // Singleton — hält alle persistenten Einstellungen.
@@ -118,33 +119,8 @@ public:
     QString userSystemPrompt() const           { return m_userSystemPrompt; }
     void setUserSystemPrompt(const QString &v) { m_userSystemPrompt = v; save(); }
 
-    // ── Projekt-Index ─────────────────────────────────────────────────────
-    QString indexSourceRoot() const            { return m_indexSourceRoot; }
-    QString indexSandboxRoot() const           { return m_indexSandboxRoot; }
-    QString indexCachePath() const             { return m_indexCachePath; }
-    bool    indexAutoRebuild() const           { return m_indexAutoRebuild; }
-    void setIndexSourceRoot(const QString &v)  { m_indexSourceRoot = v;  save(); }
-    void setIndexSandboxRoot(const QString &v) { m_indexSandboxRoot = v; save(); }
-    void setIndexCachePath(const QString &v)   { m_indexCachePath = v;   save(); }
-    void setIndexAutoRebuild(bool v)           { m_indexAutoRebuild = v; save(); }
 
-    // ── TaskTree ──────────────────────────────────────────────────────────
-    QString taskDbPath() const           { return m_taskDbPath; }
-    void setTaskDbPath(const QString &v) { m_taskDbPath = v; save(); }
 
-    // ── Execute ───────────────────────────────────────────────────────────
-    int     executeMemoryMaxEntries() const        { return m_executeMemoryMaxEntries; }
-    void setExecuteMemoryMaxEntries(int v)         { m_executeMemoryMaxEntries = v; save(); }
-    bool    executeAutoMode() const                { return m_executeAutoMode; }
-    void setExecuteAutoMode(bool v)                { m_executeAutoMode = v; save(); }
-    QString executeSandboxProject() const          { return m_executeSandboxProject; }
-    void setExecuteSandboxProject(const QString &v){ m_executeSandboxProject = v; save(); }
-    bool    assembleOnlyDone() const               { return m_assembleOnlyDone; }
-    void setAssembleOnlyDone(bool v)               { m_assembleOnlyDone = v; save(); }
-    bool    debugExecute() const                   { return m_debugExecute; }
-    void setDebugExecute(bool v)                   { m_debugExecute = v; save(); }
-    QString debugLogDir() const                    { return m_debugLogDir; }
-    void setDebugLogDir(const QString &v)          { m_debugLogDir = v; save(); }
 
 signals:
     void chatLoggingChanged(bool enabled);
@@ -193,17 +169,6 @@ private:
 
     QString m_userSystemPrompt = "";
 
-    QString m_indexSourceRoot  = "";
-    QString m_indexSandboxRoot = "";
-    QString m_indexCachePath   = "";
-    bool    m_indexAutoRebuild = true;
 
-    QString m_taskDbPath = "";
 
-    int     m_executeMemoryMaxEntries = 50;
-    bool    m_executeAutoMode         = true;
-    QString m_executeSandboxProject   = "";
-    bool    m_assembleOnlyDone        = true;
-    bool    m_debugExecute            = true;
-    QString m_debugLogDir             = "/home/thomas/llamatools/debug";
 };

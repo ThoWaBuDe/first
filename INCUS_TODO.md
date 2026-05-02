@@ -1,6 +1,6 @@
 # LlamaQt — Incus Container Integration
 
-> Stand: Mai 2026
+> Stand: Mai 2026 — noch nicht implementiert, Phase 1 ausstehend
 > Ziel: LLM-Tools laufen in einem isolierten Incus-Container.
 > Host-System und LlamaQt bleiben unberührt, auch wenn das LLM "zerbombt".
 

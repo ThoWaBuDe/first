@@ -5,8 +5,6 @@
 #include "Agent/Agent.h"
 #include "UI/ConfigDialog.h"
 #include "UI/EditorDock.h"
-#include "UI/PlannerDock.h"
-#include "UI/NodeGraphView.h"
 #include "UI/SearchBar.h"
 
 
@@ -16,7 +14,7 @@ namespace Ui { class MainWindow; }
 // Pattern: View aus MVP.
 // Kennt nur Widgets und Agent. Keine Business-Logik.
 //
-// Neu: PlannerDock als QDockWidget an der linken Seite.
+// Qt6 Widgets + Agent. Keine Business-Logik.
 // Wird initial ausgeblendet und durch Agent::modeChanged(Plan) eingeblendet.
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -40,11 +38,7 @@ private slots:
                         int totalTokens,  int ctxSize);
 
     // Modus-Änderung: PlannerDock ein-/ausblenden
-    void onModeChanged(AgentMode mode);
 
- //   void onShowGraph();
-
-    void onRefreshGraph();
 
     void onSearchRequested();
 
@@ -58,8 +52,6 @@ private:
     Ui::MainWindow *ui;
     Agent          *m_agent;
     EditorDock     *m_editorDock;
-    PlannerDock    *m_plannerDock;   // NEU
-    NodeGraphView *m_graphView = nullptr;
     SearchBar *m_searchBar = nullptr;
 
     static constexpr int AUTOSCROLL_THRESHOLD = 20;

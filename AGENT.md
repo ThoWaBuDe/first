@@ -1,14 +1,14 @@
-# LlamaQt — AGENT.md (aktualisiert)
+# LlamaQt — AGENT.md
 > Projektgedächtnis für Claude und Qwen.
 
 ---
 
 ## Projektübersicht
 
-**LlamaQt** ist eine lokale LLM-Chat-Oberfläche die zu einem vollständigen
-**lokalen Coding-Agenten** ausgebaut wird.
+**LlamaQt** ist eine lokale LLM-Chat-Oberfläche mit Tool-Use via MCP-Server.
+Entwickelt für Qwen3 auf Debian Trixie.
 
-- Inference: llama.cpp (Qwen3.5-9B-Q6_K oder 26B, lokal)
+- Inference: llama.cpp (Qwen3.5-9B-Q6_K oder 27B Q4, lokal)
 - Tool-Use: MCP-Server via stdio JSON-RPC 2.0
 - GUI: Qt6 Widgets
 - Build: CMake, Debian Trixie
@@ -23,108 +23,24 @@ MainWindow  (View)
     ▼
 Agent       (Koordinator, GUI-Thread)
     ├── AgentChat      — Chat-Modus (Tool-Calls, filterToken, summarize)
-    ├── AgentPlan      — Plan-Modus (iterativ + JSON-Fallback)
-    ├── AgentExecute   — Execute-Modus (Code + Validierung)
-    ├── AgentAssemble  — Assembly (Nodes → Dateien)
     ├── AgentUtils     — Namespace: repairJson, toolCallKey, ...
     ├── ChatModel      — Gesprächshistorie
     ├── McpManager     — Facade + Auto-Restart mit Backoff
     ├── CommandProcessor
     ├── ChatLogger
-    ├── AppConfig      — Singleton, 3 Sampler-Profile
-    ├── TaskTree       — RAM-first + SQLite + Symbol-Index
-    ├── ExecuteMemory  — Thoughts/Kurzzeitgedächtnis
-    ├── CodeAssembler  — deduplicateIncludes
+    ├── AppConfig      — Singleton, 2 Sampler-Profile (Chat, Tool)
     └── LlamaWorker    (Active Object, Worker-Thread)
           └── llama.cpp
 ```
 
 ---
 
-## TaskTree — Aufgabenbaum
+## Sampler-Profile (2 Profile)
 
-### Hierarchie
-```
-H0 (level=0) — Gesamtziel
-H1 (level=1) — Dateigruppe / Modul
-H2 (level=2) — Einzelne Datei
-H3 (level=3) — Implementierungsschritt (Methode)
-H4 (level=4) — Validierungs-Node (automatisch nach H3)
-```
-
-### TaskNode Felder (v4)
-```
-id, level, order, insertionIdx, scope
-title, description
-symbol           — NEU: C++-Symbolname ("Timer::start()")
-result           — sauberer Code
-sideOutput       — Thinking, Warnungen
-buildPrompt      — Debugging: was hat das Modell gesehen?
-validationResult — NEU: "ok" oder Fehlerbeschreibung
-dependsOn        — horizontale Abhängigkeiten
-status, createdAt, updatedAt
-```
-
-### Symbol-Awareness
-```
-TaskTree::symbolExists("Timer::start()") → O(1)
-TaskTree::findBySymbol("Timer::start()") → TaskNode*
-TaskTree::setSymbol(node, "Timer::start()")
-```
-
-### Validierungs-Node (H4)
-```
-Nach jedem H3-Node automatisch:
-  createValidationNode(implNode) → H4-Node als Kind
-
-H4-Prompt: "Prüfe diesen Code. Antworte mit 'ok' oder '<Fehler>'"
-H4-Ergebnis:
-  "ok"     → H4 Done, weiter
-  "<Fehler>" → H4 Failed, H3-Elter als Failed markieren
-```
-
----
-
-## Plan-Modus (iterativ — NEU)
-
-### Ablauf
-```
-/plan <Auftrag>
-  → startPlan() → TaskTree.clear()
-  → Modell bekommt create_node / set_depends_on / get_nodes / plan_done Tools
-  → Modell baut Graph Node für Node
-  → plan_done → planReady() → PlannerDock
-
-Fallback: Modell gibt <plan>...</plan> JSON → handlePlanJson() wie bisher
-```
-
-### Interne Plan-Tools
-```
-create_node     — Node anlegen (prüft Symbol-Duplikate!)
-set_depends_on  — Abhängigkeit from_id → to_id
-get_nodes       — aktuellen Baum anzeigen
-plan_done       — Plan abschließen
-```
-
-### Symbol-Duplikat-Schutz
-```
-create_node mit bekanntem Symbol →
-  {"warning": "Symbol 'Timer::start()' existiert bereits in Node 5",
-   "existing_id": 5}
-→ Modell verwendet set_depends_on statt neuen Node
-```
-
----
-
-## Sampler-Profile (3 Profile)
-
-| Profil  | Top-K | Temp | Verwendung                    |
-|---------|-------|------|-------------------------------|
-| Chat    | 40    | 0.7  | Konversation, Plan-Analyse    |
-| Execute | 20    | 0.2  | Code-Generierung (NEU)        |
-| Tool    | 20    | 0.1  | JSON Tool-Calls, Optimize     |
-
-Alle konfigurierbar in AppConfig + ConfigDialog Sampler-Tab.
+| Profil | Top-K | Temp | Verwendung              |
+|--------|-------|------|-------------------------|
+| Chat   | 40    | 0.7  | Konversation            |
+| Tool   | 20    | 0.1  | JSON Tool-Calls         |
 
 ---
 
@@ -140,51 +56,86 @@ Server crasht → serverDied Signal
 
 ---
 
-## Execute-Modus (mit Validierung)
+## Tool-Call-Format Detection
 
 ```
-advanceExecute()
-  → nextPending() — Pending-Blatt-Node (H3 oder H4)
-
-  H3-Node:
-    → buildExecutePrompt() (Lichtkegel + Symbol + Geschwister)
-    → startGeneration(Execute-Sampler)
-    → handleExecuteCode() → result + sideOutput
-    → createValidationNode() → H4-Node anlegen
-    → updateThoughts()
-
-  H4-Validierungs-Node:
-    → buildValidationPrompt() (Code + Interface)
-    → startGeneration(Chat-Sampler)
-    → handleValidationResult()
-      "ok"     → H4 Done → advanceExecute()
-      "<Fehler>" → H4 Failed, H3 Failed → advanceExecute()
+GGUF Jinja-Template → ToolCallFormat::detectFromJinja()
+  → Auto: Modellname → ToolCallFormat::detectFromModelName()
+  → Agent::onToolFormatDetected() → m_activeToolFormat
+  → McpManager::buildToolsSystemPrompt(m_activeToolFormat)
 ```
+
+Unterstützte Formate: QwenXmlTags, MistralNative, Gemma4Google,
+Llama3ToolUse, Generic.
+
+---
+
+## Entscheidungen & Learnings
+
+### Node-Konzept (eingefroren Mai 2026)
+
+TaskTree/TaskNode/Plan/Execute/Assemble wurde entwickelt und dann
+bewusst eingefroren. Grund:
+
+- Kleine lokale Modelle (9B-27B) verlieren Konsistenz über viele
+  Tool-Call-Sequenzen
+- Header↔CPP-Konsistenz nicht zuverlässig herstellbar
+- Code-Assembler hatte zu viele Sonderfälle (keine generische Lösung)
+- Overhead enorm im Verhältnis zum erzielbaren Nutzen
+
+Der Code liegt im Git-History (Commit: "Node Konzept derzeit nicht
+weiter verfolgt, für kleine LLM zu komplex").
+
+### Nächste Richtung: Symbol-basiertes Editing
+
+Statt Nodes generieren → Code assemblen:
+- LlamaQt holt eine Funktion via get_function_body / clangd
+- LLM bekommt NUR diese eine Funktion als Kontext
+- LLM schreibt modifizierte Version
+- LlamaQt schreibt sie zurück via replace_symbol
+- Git als Undo
+
+Ein Schritt, isolierter Kontext, deterministisch kontrolliert.
+Passt zu lokalen 14B Modellen.
+
+### Modell-Grenzen (empirisch)
+
+- Qwen3.5-9B-Q6_K: Tool-Calling funktioniert, kleine Aufgaben OK
+- Qwen3.6-27B-Q4_K_M: Tool-Calling gut, größere Aufgaben möglich
+- Qwen2.5-Coder-14B-Q6_K: Tool-Calling funktioniert NICHT mit
+  <tool_call>-Format (generiert JSON in Code-Block ohne Tags)
+- Devstral-Small-2-24B: Mistral-Format, funktioniert
+- TicTacToe mit 14B: 4/10 Versuche erfolgreich (mit Tool-Use)
+- Mehrstufige Planung über viele Dateien: nicht zuverlässig möglich
+
+### Deterministische Seeds → Loops
+
+Feste Seeds führen zu Endlosschleifen bei wiederholten Fehlern.
+Immer /dev/urandom Seeds, vor jeder Generation neu ziehen.
+
+### GBNF Grammar mit Thinking-Modellen
+
+llama_sampler_init_grammar_lazy_patterns() crasht mit Qwen Thinking.
+Lösung: Post-hoc JSON-Validierung + </tool_call> Stop-Sequenz.
+
+### llama_kv_cache_seq_rm
+
+In aktueller llama.cpp Version umbenannt zu llama_memory_seq_rm.
 
 ---
 
 ## Offene TODOs
 
-### Abgehakt ✓
-- A B C D — Bugs in advanceExecute, Marker, Thoughts, dependsOn
-- E — Agent God Object aufgeteilt (AgentChat/Plan/Execute/Assemble/Utils)
-- F — Symbol-Awareness im Planner-Prompt
-- G — Iterativer Plan-Aufbau mit create_node Tools
-- H — Symbol-Feld in TaskNode + Symbol-Index in TaskTree
-- I — SamplerProfile::Execute (dritter Sampler)
-- N — Validierungs-Node H4 nach jedem H3
-- O — Skelett-Hinweis im Execute-Prompt
-- S — MCP Auto-Restart mit Exponential Backoff
+### Infrastruktur
+- Q — generateDelta() aktivieren (n_past-Tracking in LlamaWorker)
+- R — KV-Cache Rollback (llama_memory_seq_rm nach Tool-Fehler)
 
-### Offen
-- J — Feedback Execute → Optimizer (check_syntax nach Validierung)
-- K — Semantic Merge LLM (Assembly-Qualität)
-- L — Clang-AST Rückkopplung
-- M — Pre-Execute Dry-Run
-- P — MCP für Node-Manipulation (extern)
-- Q — generateDelta() aktivieren
-- R — KV-Cache Rollback
-- T — NodeGraphView Layout-Verbesserung
+### Features
+- Symbol-basiertes Editing (nächste Hauptrichtung)
+- Incus Container Integration (INCUS_TODO.md)
+- Persistent conversation memory zwischen Sessions
+- XTC/DRY Sampler-Optionen
+- Multiple Modell-Support (klein für Tool-Calls, groß für Planung)
 
 ---
 
@@ -194,3 +145,10 @@ advanceExecute()
 cd ~/ai/LlamaQT && mkdir -p build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)
 ```
+
+## Key Source Locations
+
+- Main project: `~/ai/LlamaQT/`
+- Sandbox: `~/llamatools/`
+- Chat logs: `~/llamatools/chat_log/`
+- MCP servers: `LlamaQt/mcp-servers/{filesystem,sysinfo,compile,websearch,tree-sitter,clang}/`
