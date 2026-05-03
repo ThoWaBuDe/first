@@ -14,9 +14,15 @@ McpClient::McpClient(QObject *parent)
 
 McpClient::~McpClient()
 {
+    // Signal trennen BEVOR terminate() — sonst feuert finished → onProcessFinished
+    // → emit serverDied → McpManager::scheduleRestart greift auf bereits
+    // halb-zerstörten McpClient zu (Use-after-free / Segfault).
+    disconnect(&m_process, nullptr, this, nullptr);
+
     if (m_process.state() != QProcess::NotRunning) {
         m_process.terminate();
-        m_process.waitForFinished(2000);
+        if (!m_process.waitForFinished(2000))
+            m_process.kill();  // Notfall: SIGKILL wenn terminate ignoriert wird
     }
 }
 

@@ -1,7 +1,6 @@
 #include "Agent/Agent.h"
 #include "Agent/AgentChat.h"
 #include "Agent/AgentUtils.h"
-#include "MCP/McpManager.h"
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -123,6 +122,7 @@ void Agent::start()
     addMcpServer("sysinfo");
     addMcpServer("compile");
     addMcpServer("websearch");
+    addMcpServer("workspace");
 
     // tree-sitter und clang laufen immer lokal —
     // sie brauchen Zugriff auf Host-Quelldateien (~/ai/LlamaQT/src/).
@@ -159,10 +159,7 @@ void Agent::onIncusContainerChanged(const QString &containerName,
     cfg.setIncusContainer(containerName);
     cfg.setIncusEnabled(!containerName.isEmpty());
 
-    qDebug() << "onIncusContainerChanged:" << containerName << ip;
-    qDebug() << "incusEnabled:" << cfg.incusEnabled();
-    qDebug() << "incusContainer:" << cfg.incusContainer();
-
+    const QString incusBin = cfg.incusBinDir();
 
     emit appendTools(
         QString("<b>Incus:</b> Container → <i>%1</i><br>"
@@ -172,16 +169,10 @@ void Agent::onIncusContainerChanged(const QString &containerName,
     emit inputEnabled(false);
     emit statusChanged("MCP-Server werden neu gestartet...");
 
-    // Container für alle Server setzen (filesystem/sysinfo/compile/websearch).
-    // tree-sitter und clang bleiben lokal — ihr incusContainer bleibt leer.
-    // setIncusContainer() setzt den Container für ALLE Einträge, also müssen
-    // wir tree-sitter und clang danach wieder auf leer setzen.
-    //
-    // Einfacherer Weg: McpManager kennt bereits die Server-Liste mit den
-    // richtigen Binaries. Wir rufen setIncusContainer() nur für die
-    // Container-Server auf (Index 0-3), nicht für tree-sitter/clang (4-5).
-    const QString incusBin = cfg.incusBinDir();
-    m_mcp.setIncusContainerForRange(0, 3, containerName, incusBin);
+    // Container für alle 5 Container-Server setzen (0-4):
+    // filesystem, sysinfo, compile, websearch, workspace
+    // tree-sitter (5) und clang (6) bleiben lokal.
+    m_mcp.setIncusContainerForRange(0, 4, containerName, incusBin);
 
     m_mcp.startAll([this](bool ok, QStringList errors) {
         if (!ok)
@@ -501,14 +492,14 @@ void Agent::onGenerationDone(const QString &fullResponse)
         m_chatModel.clear();
         m_chatModel.setSystemPrompt(buildFullSystemPrompt());
         m_chatModel.addUserMessage(
-            QString("[Zusammenfassung:\n%1]").arg(fullResponse));
+            QString("[Summary:\n%1]").arg(fullResponse));
         m_chatModel.addAssistantMessage(
-            "Verstanden. Ich habe die bisherige Konversation im Überblick.");
+            "Understood. I have an overview of the previous conversation.");
         emit appendTools(
-            QString("<b>Zusammenfassung:</b><br><pre style='font-size:10px'>%1</pre>")
+            QString("<b>Summary:</b><br><pre style='font-size:10px'>%1</pre>")
             .arg(fullResponse.left(500).toHtmlEscaped()), "system");
         emit inputEnabled(true);
-        emit statusChanged("Zusammenfassung fertig");
+        emit statusChanged("Summary complete");
         return;
     }
 

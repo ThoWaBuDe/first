@@ -1,16 +1,30 @@
 #!/bin/bash
 set -e
 
-# llamaqt User anlegen falls nicht vorhanden
+# ─── llamaqt User anlegen falls nicht vorhanden ───────────────────────────────
 if ! id -u llamaqt &>/dev/null; then
-    useradd -r -s /bin/false -d /home/llamaqt -m llamaqt
+    useradd -r -m -d /home/llamaqt -s /bin/bash llamaqt
+    echo "  User llamaqt angelegt"
+else
+    echo "  User llamaqt existiert bereits"
 fi
 
-# Sandbox-Verzeichnis
-mkdir -p /home/llamaqt/sandbox
-chown llamaqt:llamaqt /home/llamaqt/sandbox
+# ─── Workplace-Verzeichnis ────────────────────────────────────────────────────
+mkdir -p /home/llamaqt/workplace
+chown -R llamaqt:llamaqt /home/llamaqt/workplace
 
-# systemd neu laden und Service aktivieren
+# ─── sudoers: llamaqt darf apt-get ohne Passwort ─────────────────────────────
+# Nur apt-get und apt — keine Shell, kein su, kein chmod
+SUDOERS_FILE="/etc/sudoers.d/llamaqt-apt"
+cat > "$SUDOERS_FILE" << 'EOF'
+# LlamaQt Container: llamaqt darf apt/apt-get ohne Passwort verwenden
+llamaqt ALL=(root) NOPASSWD: /usr/bin/apt-get
+llamaqt ALL=(root) NOPASSWD: /usr/bin/apt
+EOF
+chmod 0440 "$SUDOERS_FILE"
+echo "  sudoers: /etc/sudoers.d/llamaqt-apt angelegt"
+
+# ─── systemd neu laden und Service aktivieren ─────────────────────────────────
 systemctl daemon-reload
 systemctl enable llamaqt-mcp
 systemctl start  llamaqt-mcp

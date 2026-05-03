@@ -23,7 +23,7 @@ install(TARGETS llamaqt-mcp-proxy
 
 # MCP-Server Binaries — werden von build-in-container.sh unter /tmp/build-*/
 # gebaut. Pfad muss mit dem Build-Script übereinstimmen.
-foreach(SERVER filesystem sysinfo compile websearch)
+foreach(SERVER filesystem sysinfo compile websearch workspace)
     install(PROGRAMS /tmp/build-${SERVER}/llamaqt-${SERVER}
             DESTINATION lib/llamaqt-mcp
             OPTIONAL)

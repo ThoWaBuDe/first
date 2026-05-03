@@ -25,6 +25,7 @@ public:
     using ToolCallback = McpClient::ToolCallback;
 
     explicit McpManager(QObject *parent = nullptr);
+    ~McpManager() override;
 
     // incusContainer leer    → lokaler Prozess (bisheriges Verhalten)
     // incusContainer gesetzt → incus exec <container> -- <binary> <args>

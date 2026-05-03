@@ -2,6 +2,7 @@
 #include <QJsonDocument>
 #include <QStringList>
 #include <QVector>
+#include <QRegularExpression>
 
 namespace AgentUtils {
 
@@ -43,6 +44,40 @@ QString repairJson(const QString &broken)
         withDouble.replace('\'', '"');
         if (!QJsonDocument::fromJson(withDouble.toUtf8()).isNull())
             return withDouble;
+    }
+
+    // Stufe 4: unquoted string values quoten
+    // Erkennt Muster wie: "name": bash_exec  →  "name": "bash_exec"
+    // Regex: nach einem : (mit optionalem Whitespace) steht ein Wort
+    // das KEIN JSON-Literal ist (true/false/null) und nicht mit { [ " oder Zahl beginnt.
+    //
+    // Beispiel:
+    //   {"name": bash_exec, "arguments": {...}}
+    //   → {"name": "bash_exec", "arguments": {...}}
+    {
+        QString quoted = noTrailing;
+        // Muster: ": " gefolgt von einem Bezeichner (Buchstaben, Ziffern, _, -)
+        // der NICHT in " steht und kein Zahl/bool/null/Objekt/Array ist.
+        static const QRegularExpression unquotedVal(
+            ":\\s*([A-Za-z_][A-Za-z0-9_\\-]*)\\s*([,}\\]])");
+        QRegularExpressionMatch m;
+        int offset = 0;
+        while (true) {
+            m = unquotedVal.match(quoted, offset);
+            if (!m.hasMatch()) break;
+            QString word = m.captured(1);
+            // JSON-Literale und Zahlen nicht anfassen
+            if (word == "true" || word == "false" || word == "null") {
+                offset = m.capturedEnd();
+                continue;
+            }
+            // Ersetzen: ": word," → ": \"word\","
+            int start  = m.capturedStart(1);
+            int length = word.length();
+            quoted.replace(start, length, "\"" + word + "\"");
+            offset = start + word.length() + 2; // +2 für die zwei Anführungszeichen
+        }
+        if (!QJsonDocument::fromJson(quoted.toUtf8()).isNull()) return quoted;
     }
 
     return {}; // Reparatur fehlgeschlagen

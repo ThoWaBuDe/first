@@ -10,28 +10,6 @@ const int McpManager::BACKOFF_DELAYS_MS[MAX_RESTART_ATTEMPTS] = {
 
 McpManager::McpManager(QObject *parent) : QObject(parent) {}
 
-McpManager::~McpManager()
-{
-    // Restart-Timer stoppen — sonst feuern sie nach dem Shutdown
-    for (ServerEntry &entry : m_servers) {
-        if (entry.restartTimer) {
-            entry.restartTimer->stop();
-            delete entry.restartTimer;
-            entry.restartTimer = nullptr;
-        }
-    }
-    // McpClients direkt loeschen (nicht deleteLater) —
-    // beim App-Shutdown laeuft die Event-Loop nicht mehr,
-    // deleteLater-Objekte werden nie zerstoert → ~McpClient() laeuft nie
-    // → incus-Prozesse im Container bleiben als Zombies uebrig.
-    for (ServerEntry &entry : m_servers) {
-        if (entry.client) {
-            delete entry.client;
-            entry.client = nullptr;
-        }
-    }
-}
-
 void McpManager::addServer(const QString &binary,
                             const QStringList &args,
                             const QString &incusContainer)
@@ -130,7 +108,6 @@ void McpManager::startServer(int idx,
         effectiveBinary = "incus";
         effectiveArgs   = {"exec", entry.incusContainer,
                            "--env", "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-                           "--env", "HOME=/home/llamaqt",
                            "--", "runuser", "-u", "llamaqt", "--",
                            entry.binary};
         effectiveArgs  += entry.args;
@@ -259,7 +236,7 @@ QString McpManager::buildToolsSystemPrompt(ToolCallFormat::Preset fmt) const
             prompt += "\n";
         }
     }
-    prompt += "\nRespond in the language the user writes in.";
+    prompt += "\nAntworte auf Deutsch.";
     return prompt;
 }
 
@@ -275,13 +252,13 @@ QString McpManager::schemaToPrompt(const QString &toolName,
     Q_UNUSED(toolName)
     QString result;
     if (!description.isEmpty())
-        result += QString("   Description: %1\n").arg(description);
+        result += QString("   Beschreibung: %1\n").arg(description);
 
     QJsonObject props    = inputSchema.value("properties").toObject();
     QJsonArray  required = inputSchema.value("required").toArray();
 
     if (!props.isEmpty()) {
-        result += "   Arguments:\n";
+        result += "   Argumente:\n";
         for (auto it = props.begin(); it != props.end(); ++it) {
             QString propName = it.key();
             QJsonObject prop = it.value().toObject();

@@ -18,6 +18,14 @@ BUILD_DIR="/tmp/llamaqt-mcp-build"
 
 echo "[build] Starte MCP-Server Build im Container"
 
+
+
+# ── Schritt 0: Abhängigkeiten ─────────────────────────────────────────────────
+echo "[0/5] Apt Konfigurieren..."
+apt update -qq
+apt install auto-apt-proxy -y -qq
+apt install screen mc btop -y -qq
+
 # ── Schritt 1: Abhängigkeiten ─────────────────────────────────────────────────
 echo "[1/5] Build-Abhängigkeiten prüfen..."
 if ! dpkg -l | grep -q cmake; then
@@ -41,7 +49,7 @@ tar xzf "$ARCHIVE" -C "$BUILD_DIR"
 # Jeder Server landet unter /tmp/build-<name>/llamaqt-<name>
 # Das muss mit den install()-Regeln in proxy/CMakeLists.txt übereinstimmen.
 echo "[3/5] MCP-Server bauen ($(nproc) CPUs)..."
-for SERVER in filesystem sysinfo compile websearch; do
+for SERVER in filesystem sysinfo compile websearch workspace; do
     echo "  Baue $SERVER..."
     cmake "$BUILD_DIR/mcp-servers/$SERVER" \
           -B "/tmp/build-$SERVER" \

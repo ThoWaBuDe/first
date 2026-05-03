@@ -197,11 +197,12 @@ struct ToolCallFormat {
         case Preset::Auto:
         default:
             return
-                "You may call one or more functions to assist with the user query.\n\n"
-                "For each function call, return a json object with function name and "
-                "arguments within <tool_call></tool_call> XML tags:\n"
+                "You are a helpful assistant with access to tools.\n\n"
+                "To call a tool, emit a JSON object inside <tool_call> XML tags.\n"
+                "Every string value — including the tool name — must be in double quotes.\n"
+                "Format:\n"
                 "<tool_call>\n"
-                "{\"name\": <function-name>, \"arguments\": <args-json-object>}\n"
+                "{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n"
                 "</tool_call>\n\n"
                 "Wait for the result before making the next tool call.\n"
                 "Available tools:\n";
