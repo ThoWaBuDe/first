@@ -26,7 +26,6 @@ void AppConfig::load()
         m_settings.value("chat_template_preset",
                          static_cast<int>(ChatTemplate::Preset::Auto)).toInt());
     m_customChatTemplate = m_settings.value("custom_chat_template", "").toString();
-    // NEU: Tool-Call-Format
     m_toolCallFormat = static_cast<ToolCallFormat::Preset>(
         m_settings.value("tool_call_format",
                          static_cast<int>(ToolCallFormat::Preset::Auto)).toInt());
@@ -72,6 +71,12 @@ void AppConfig::load()
     m_chatLoggingEnabled = m_settings.value("chat_enabled", m_chatLoggingEnabled).toBool();
     m_chatLogDir         = m_settings.value("chat_log_dir", m_chatLogDir).toString();
     m_settings.endGroup();
+
+    m_settings.beginGroup("Incus");
+    m_incusEnabled   = m_settings.value("enabled",   false).toBool();
+    m_incusContainer = m_settings.value("container", "").toString();
+    m_incusBinDir    = m_settings.value("bin_dir",   "/usr/lib/llamaqt-mcp").toString();
+    m_settings.endGroup();
 }
 
 void AppConfig::save()
@@ -82,7 +87,6 @@ void AppConfig::save()
     m_settings.setValue("batch_size",           m_batchSize);
     m_settings.setValue("chat_template_preset", static_cast<int>(m_chatTemplatePreset));
     m_settings.setValue("custom_chat_template", m_customChatTemplate);
-    // NEU: Tool-Call-Format
     m_settings.setValue("tool_call_format",     static_cast<int>(m_toolCallFormat));
     m_settings.endGroup();
 
@@ -119,6 +123,12 @@ void AppConfig::save()
     m_settings.beginGroup("Logging");
     m_settings.setValue("chat_enabled", m_chatLoggingEnabled);
     m_settings.setValue("chat_log_dir", m_chatLogDir);
+    m_settings.endGroup();
+
+    m_settings.beginGroup("Incus");
+    m_settings.setValue("enabled",   m_incusEnabled);
+    m_settings.setValue("container", m_incusContainer);
+    m_settings.setValue("bin_dir",   m_incusBinDir);
     m_settings.endGroup();
 
     m_settings.sync();

@@ -8,9 +8,15 @@
 #include "Chat/ToolCallFormat.h"
 
 // ─── McpManager ───────────────────────────────────────────────────────────────
-// NEU: buildToolsSystemPrompt() und toolCallHeader() bekommen
-// ToolCallFormat::Preset als Parameter.
-// Dadurch gibt McpManager automatisch das richtige Format-Beispiel aus.
+// Facade über mehrere McpClients mit Auto-Restart (Backoff).
+//
+// Incus-Erweiterung:
+//   addServer() hat optionalen incusContainer-Parameter.
+//   Wenn gesetzt: QProcess startet "incus exec <container> -- <binary>"
+//   statt das Binary direkt. McpClient merkt nichts davon.
+//
+//   setIncusContainer() setzt den Container für alle registrierten Server
+//   auf einmal — wird von Agent::onIncusContainerChanged() aufgerufen.
 
 class McpManager : public QObject {
     Q_OBJECT
@@ -20,8 +26,27 @@ public:
 
     explicit McpManager(QObject *parent = nullptr);
 
-    void addServer(const QString &binary, const QStringList &args = {});
+    // incusContainer leer    → lokaler Prozess (bisheriges Verhalten)
+    // incusContainer gesetzt → incus exec <container> -- <binary> <args>
+    void addServer(const QString &binary,
+                   const QStringList &args = {},
+                   const QString &incusContainer = {});
+
     void startAll(std::function<void(bool ok, QStringList errors)> onAllReady);
+
+    // Setzt den incusContainer für alle registrierten Server auf einmal.
+    // Beim nächsten startAll()/startServer() wird dieser Container verwendet.
+    // Leerer String = zurück zu lokalen Prozessen.
+    void setIncusContainer(const QString &container);
+
+    // Setzt Container + Binary-Prefix nur für einen Bereich der Server-Liste.
+    // firstIdx/lastIdx inklusiv (0-basiert).
+    // newBinary wird nur gesetzt wenn nicht leer — so bleibt der lokale
+    // Pfad für tree-sitter/clang unverändert.
+    // Wird von Agent::onIncusContainerChanged() aufgerufen.
+    void setIncusContainerForRange(int firstIdx, int lastIdx,
+                                   const QString &container,
+                                   const QString &binDir);
 
     bool containsTool(const QString &name) const;
 
@@ -29,11 +54,9 @@ public:
                   const QJsonObject &arguments,
                   ToolCallback callback);
 
-    // NEU: Format als Parameter — Agent übergibt m_activeToolFormat
     QString buildToolsSystemPrompt(
         ToolCallFormat::Preset fmt = ToolCallFormat::Preset::QwenXmlTags) const;
 
-    // NEU: delegiert an ToolCallFormat::systemPromptHeader()
     static QString toolCallHeader(
         ToolCallFormat::Preset fmt = ToolCallFormat::Preset::QwenXmlTags);
 
@@ -59,6 +82,7 @@ private:
     struct ServerEntry {
         QString     binary;
         QStringList args;
+        QString     incusContainer;  // leer = lokal, gesetzt = via incus exec
         McpClient  *client       = nullptr;
         bool        ready        = false;
         QString     error;

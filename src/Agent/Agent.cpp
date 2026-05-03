@@ -1,6 +1,7 @@
 #include "Agent/Agent.h"
 #include "Agent/AgentChat.h"
 #include "Agent/AgentUtils.h"
+#include "MCP/McpManager.h"
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -87,11 +88,44 @@ void Agent::start()
     connect(&cfg, &AppConfig::chatLoggingChanged,
             &m_logger, &ChatLogger::setEnabled);
 
-    QString binDir = QCoreApplication::applicationDirPath();
-    m_mcp.addServer(binDir + "/mcp-servers/filesystem/llamaqt-filesystem");
-    m_mcp.addServer(binDir + "/mcp-servers/sysinfo/llamaqt-sysinfo");
-    m_mcp.addServer(binDir + "/mcp-servers/compile/llamaqt-compile");
-    m_mcp.addServer(binDir + "/mcp-servers/websearch/llamaqt-websearch");
+    const QString binDir = QCoreApplication::applicationDirPath();
+
+    // ── MCP-Server registrieren ───────────────────────────────────────────
+    // Wenn Incus aktiv und Container bekannt: Binaries im Container verwenden.
+    // Sonst: lokale Binaries (bisheriges Verhalten).
+    //
+    // Transport-Entscheidung ist in McpManager::startServer() gekapselt:
+    //   incusContainer leer    → lokaler QProcess
+    //   incusContainer gesetzt → incus exec <container> -- <binary>
+
+    const bool    useIncus  = cfg.incusEnabled() && !cfg.incusContainer().isEmpty();
+    const QString container = cfg.incusContainer();
+    const QString incusBin  = cfg.incusBinDir();  // /usr/lib/llamaqt-mcp
+
+    if (useIncus) {
+        emit appendTools(
+            QString("<b>Incus:</b> Container <i>%1</i> aktiv — "
+                    "MCP-Server laufen im Container.")
+            .arg(container.toHtmlEscaped()), "system");
+    }
+
+    // filesystem / sysinfo / compile / websearch:
+    // lokal oder im Container je nach Konfiguration
+    auto addMcpServer = [&](const QString &name) {
+        const QString localBin = binDir + "/mcp-servers/" + name + "/llamaqt-" + name;
+        const QString contBin  = incusBin + "/llamaqt-" + name;
+        m_mcp.addServer(useIncus ? contBin : localBin,
+                        {},
+                        useIncus ? container : QString{});
+    };
+
+    addMcpServer("filesystem");
+    addMcpServer("sysinfo");
+    addMcpServer("compile");
+    addMcpServer("websearch");
+
+    // tree-sitter und clang laufen immer lokal —
+    // sie brauchen Zugriff auf Host-Quelldateien (~/ai/LlamaQT/src/).
     m_mcp.addServer(binDir + "/mcp-servers/tree-sitter/llamaqt-treesitter");
     m_mcp.addServer(binDir + "/mcp-servers/clang/llamaqt-clang");
 
@@ -102,6 +136,75 @@ void Agent::start()
         QMetaObject::invokeMethod(m_worker, "initialize",
                                   Qt::QueuedConnection,
                                   Q_ARG(QString, m_modelPath));
+    });
+}
+
+// ─── onIncusContainerChanged ──────────────────────────────────────────────────
+// Wird von IncusDock::activeContainerChanged() ausgelöst wenn der User
+// einen laufenden Container auswählt.
+//
+// Ablauf:
+//   1. Container in AppConfig speichern
+//   2. McpManager: alle Server auf neuen Container umschalten
+//   3. startAll() neu aufrufen — startServer() löscht den alten Client
+//      und erstellt einen neuen mit dem neuen Container
+//   4. System-Prompt neu bauen (Tools können sich geändert haben)
+
+void Agent::onIncusContainerChanged(const QString &containerName,
+                                     const QString &ip)
+{
+    Q_UNUSED(ip)  // wird für SSE-Transport benötigt (Phase 2)
+
+    AppConfig &cfg = AppConfig::instance();
+    cfg.setIncusContainer(containerName);
+    cfg.setIncusEnabled(!containerName.isEmpty());
+
+    qDebug() << "onIncusContainerChanged:" << containerName << ip;
+    qDebug() << "incusEnabled:" << cfg.incusEnabled();
+    qDebug() << "incusContainer:" << cfg.incusContainer();
+
+
+    emit appendTools(
+        QString("<b>Incus:</b> Container → <i>%1</i><br>"
+                "MCP-Server werden neu gestartet...")
+        .arg(containerName.toHtmlEscaped()), "system");
+
+    emit inputEnabled(false);
+    emit statusChanged("MCP-Server werden neu gestartet...");
+
+    // Container für alle Server setzen (filesystem/sysinfo/compile/websearch).
+    // tree-sitter und clang bleiben lokal — ihr incusContainer bleibt leer.
+    // setIncusContainer() setzt den Container für ALLE Einträge, also müssen
+    // wir tree-sitter und clang danach wieder auf leer setzen.
+    //
+    // Einfacherer Weg: McpManager kennt bereits die Server-Liste mit den
+    // richtigen Binaries. Wir rufen setIncusContainer() nur für die
+    // Container-Server auf (Index 0-3), nicht für tree-sitter/clang (4-5).
+    const QString incusBin = cfg.incusBinDir();
+    m_mcp.setIncusContainerForRange(0, 3, containerName, incusBin);
+
+    m_mcp.startAll([this](bool ok, QStringList errors) {
+        if (!ok)
+            for (const QString &e : errors)
+                emit appendTools("MCP Fehler: " + e, "error");
+
+        m_chatModel.setSystemPrompt(buildFullSystemPrompt());
+
+        QString toolDebug = "<b>MCP Tools (Container):</b><br>";
+        int toolCount = 0;
+        for (const auto &info : m_mcp.debugToolInfo()) {
+            toolDebug += QString("&nbsp;<i>%1</i>: ")
+                         .arg(info.serverName.toHtmlEscaped());
+            toolDebug += info.toolNames.join(", ").toHtmlEscaped() + "<br>";
+            toolCount += info.toolNames.size();
+        }
+        toolDebug += toolCount == 0
+            ? "<b>WARNUNG: Keine Tools!</b>"
+            : QString("<b>%1 Tools geladen</b>").arg(toolCount);
+        emit appendTools(toolDebug, "system");
+
+        emit inputEnabled(true);
+        emit statusChanged("Bereit");
     });
 }
 
@@ -209,7 +312,6 @@ void Agent::onUserMessage(const QString &text)
                 return;
             }
 
-            // Plan/Execute/Import — noch nicht implementiert
             if (result.prompt.startsWith("__PLAN__:") ||
                 result.prompt == "__EXECUTE__"         ||
                 result.prompt.startsWith("__IMPORT__:")) {
@@ -394,7 +496,6 @@ void Agent::onGenerationDone(const QString &fullResponse)
         return ToolCallFormat::isCompleteToolCall(fullResponse, m_activeToolFormat);
     };
 
-    // ── Summarize ─────────────────────────────────────────────────────────
     if (m_summarizing) {
         m_summarizing = false;
         m_chatModel.clear();
@@ -411,7 +512,6 @@ void Agent::onGenerationDone(const QString &fullResponse)
         return;
     }
 
-    // ── Unvollständiger Tool-Call → Continuation ──────────────────────────
     if (hasToolCall() && !isComplete()) {
         ++m_continuationCount;
         if (m_continuationCount > MAX_CONTINUATIONS) {
@@ -435,14 +535,12 @@ void Agent::onGenerationDone(const QString &fullResponse)
 
     m_continuationCount = 0;
 
-    // ── Vollständiger Tool-Call ────────────────────────────────────────────
     if (hasToolCall() && isComplete()) {
         m_chatModel.addAssistantMessage(fullResponse);
         m_chat->handleToolCall(fullResponse, mySession);
         return;
     }
 
-    // ── Normale Antwort ───────────────────────────────────────────────────
     m_chatModel.addAssistantMessage(fullResponse);
     m_logger.logAssistant(fullResponse);
     emit inputEnabled(true);

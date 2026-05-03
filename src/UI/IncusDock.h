@@ -14,6 +14,7 @@
 #include <QRadioButton>
 #include "Incus/IncusManager.h"
 #include "Incus/IncusContainer.h"
+#include "Config/AppConfig.h"
 
 // ─── IncusDock ────────────────────────────────────────────────────────────────
 // QDockWidget mit 4 Tabs für die gesamte Incus-Integration.

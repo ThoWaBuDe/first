@@ -385,6 +385,10 @@ void IncusDock::onRefreshContainers()
 
 void IncusDock::onContainerSelected(int row)
 {
+    qDebug() << "onContainerSelected row=" << row
+             << "containers.size=" << m_containers.size();
+
+
     if (row < 0 || row >= m_containers.size()) {
         m_startBtn->setEnabled(false);
         m_stopBtn->setEnabled(false);
@@ -410,8 +414,14 @@ void IncusDock::onContainerSelected(int row)
         .arg(c.ipv4.isEmpty() ? "(gestoppt)" : c.ipv4));
     m_deployBtn->setEnabled(c.isRunning());
 
-    if (c.isRunning())
+    if (c.isRunning()) {
+        // NEU: Container in AppConfig speichern
+        AppConfig::instance().setIncusContainer(c.name);
+        AppConfig::instance().setIncusEnabled(true);
+        AppConfig::instance().setIncusBinDir("/usr/lib/llamaqt-mcp");
+        qDebug() << "emitting activeContainerChanged:" << c.name << c.ipv4;
         emit activeContainerChanged(c.name, c.ipv4);
+    }
 }
 
 void IncusDock::onCreateContainer()

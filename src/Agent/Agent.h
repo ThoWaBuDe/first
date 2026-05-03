@@ -15,7 +15,6 @@
 
 class AgentChat;
 
-// Modus — Plan/Execute als Platzhalter für spätere Verwendung
 enum class AgentMode { Chat, Plan, Execute };
 
 class Agent : public QObject {
@@ -40,6 +39,10 @@ public slots:
     void onStop();
     void onClearChat();
     void onFileSavedByUser(const QString &filePath);
+
+    // Incus: Container wurde aktiviert → MCP-Server neu starten
+    void onIncusContainerChanged(const QString &containerName,
+                                  const QString &ip);
 
 signals:
     void appendChat(const QString &html, const QString &cssClass);

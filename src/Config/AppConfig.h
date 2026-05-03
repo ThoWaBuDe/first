@@ -95,14 +95,8 @@ public:
         m_customChatTemplate = v; save(); emit chatTemplateChanged(); }
     void setDetectedJinjaTemplate(const QString &v) { m_detectedJinjaTemplate = v; }
 
-    // ── Tool-Call-Format (NEU) ────────────────────────────────────────────
-    // Preset: was der User im ConfigDialog eingestellt hat (Auto = auto-detect)
-    // Effective: das tatsächlich aktive Format nach Detection
-    //
-    // Analogie zu ChatTemplate:
-    //   toolCallFormatPreset() = was der User will (oder Auto)
-    //   effectiveToolCallFormat() = was tatsächlich verwendet wird
-    ToolCallFormat::Preset toolCallFormatPreset() const   { return m_toolCallFormat; }
+    // ── Tool-Call-Format ──────────────────────────────────────────────────
+    ToolCallFormat::Preset toolCallFormatPreset() const    { return m_toolCallFormat; }
     ToolCallFormat::Preset effectiveToolCallFormat() const { return m_effectiveToolCallFormat; }
 
     void setToolCallFormatPreset(ToolCallFormat::Preset v) {
@@ -110,7 +104,6 @@ public:
         save();
         emit toolCallFormatChanged(v);
     }
-    // Wird von Agent::onToolFormatDetected() gesetzt — nicht direkt vom User
     void setEffectiveToolCallFormat(ToolCallFormat::Preset v) {
         m_effectiveToolCallFormat = v;
     }
@@ -119,14 +112,20 @@ public:
     QString userSystemPrompt() const           { return m_userSystemPrompt; }
     void setUserSystemPrompt(const QString &v) { m_userSystemPrompt = v; save(); }
 
+    // ── Incus ─────────────────────────────────────────────────────────────
+    bool    incusEnabled()   const { return m_incusEnabled; }
+    QString incusContainer() const { return m_incusContainer; }
+    QString incusBinDir()    const { return m_incusBinDir; }
 
-
+    void setIncusEnabled(bool v)            { m_incusEnabled   = v; save(); }
+    void setIncusContainer(const QString &v){ m_incusContainer = v; save(); }
+    void setIncusBinDir(const QString &v)   { m_incusBinDir    = v; save(); }
 
 signals:
     void chatLoggingChanged(bool enabled);
     void modelPathChanged(const QString &path);
     void chatTemplateChanged();
-    void toolCallFormatChanged(ToolCallFormat::Preset preset); // NEU
+    void toolCallFormatChanged(ToolCallFormat::Preset preset);
 
 private:
     explicit AppConfig(QObject *parent = nullptr);
@@ -163,12 +162,13 @@ private:
     QString              m_customChatTemplate    = "";
     QString              m_detectedJinjaTemplate = "";
 
-    // NEU: Tool-Call-Format
     ToolCallFormat::Preset m_toolCallFormat          = ToolCallFormat::Preset::Auto;
     ToolCallFormat::Preset m_effectiveToolCallFormat = ToolCallFormat::Preset::QwenXmlTags;
 
     QString m_userSystemPrompt = "";
 
-
-
+    // ── Incus ─────────────────────────────────────────────────────────────
+    bool    m_incusEnabled   = false;
+    QString m_incusContainer;
+    QString m_incusBinDir    = "/usr/lib/llamaqt-mcp";
 };

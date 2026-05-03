@@ -10,12 +10,38 @@ const int McpManager::BACKOFF_DELAYS_MS[MAX_RESTART_ATTEMPTS] = {
 
 McpManager::McpManager(QObject *parent) : QObject(parent) {}
 
-void McpManager::addServer(const QString &binary, const QStringList &args)
+void McpManager::addServer(const QString &binary,
+                            const QStringList &args,
+                            const QString &incusContainer)
 {
     ServerEntry entry;
-    entry.binary = binary;
-    entry.args   = args;
+    entry.binary         = binary;
+    entry.args           = args;
+    entry.incusContainer = incusContainer;
     m_servers.append(entry);
+}
+
+void McpManager::setIncusContainer(const QString &container)
+{
+    for (ServerEntry &entry : m_servers)
+        entry.incusContainer = container;
+}
+
+void McpManager::setIncusContainerForRange(int firstIdx, int lastIdx,
+                                            const QString &container,
+                                            const QString &binDir)
+{
+    for (int i = firstIdx; i <= lastIdx && i < m_servers.size(); ++i) {
+        ServerEntry &entry = m_servers[i];
+        entry.incusContainer = container;
+        // Binary-Pfad auf Container-Pfad umbiegen wenn binDir gesetzt
+        if (!binDir.isEmpty() && !container.isEmpty()) {
+            // Dateiname aus aktuellem Binary-Pfad extrahieren
+            // z.B. ".../llamaqt-filesystem" → "llamaqt-filesystem"
+            QString baseName = QFileInfo(entry.binary).fileName();
+            entry.binary = binDir + "/" + baseName;
+        }
+    }
 }
 
 void McpManager::startAll(std::function<void(bool, QStringList)> onAllReady)
@@ -62,7 +88,28 @@ void McpManager::startServer(int idx,
         scheduleRestart(idx);
     });
 
-    entry.client->start(entry.binary, entry.args,
+    // ── Transport-Entscheidung ────────────────────────────────────────────
+    // incusContainer leer → lokaler Prozess (bisheriges Verhalten)
+    // incusContainer gesetzt → incus exec <container> -- <binary> [args...]
+    //
+    // McpClient selbst startet nur einen QProcess — er weiß nicht ob er
+    // mit einem lokalen oder Container-Prozess spricht. Das Protokoll
+    // (stdio JSON-RPC 2.0) ist in beiden Fällen identisch.
+
+    QString     effectiveBinary;
+    QStringList effectiveArgs;
+
+    if (entry.incusContainer.isEmpty()) {
+        effectiveBinary = entry.binary;
+        effectiveArgs   = entry.args;
+    } else {
+        // "incus exec <container> -- <binary> [args...]"
+        effectiveBinary = "incus";
+        effectiveArgs   = {"exec", entry.incusContainer, "--", entry.binary};
+        effectiveArgs  += entry.args;
+    }
+
+    entry.client->start(effectiveBinary, effectiveArgs,
         [this, idx, onReady](bool ok, QString err) {
             m_servers[idx].ready = ok;
             m_servers[idx].error = err;
@@ -72,6 +119,8 @@ void McpManager::startServer(int idx,
             }
             onReady(ok, err);
         });
+
+    qDebug() << "startServer:" << effectiveBinary << effectiveArgs;
 }
 
 void McpManager::rebuildToolIndex(int idx)
@@ -129,7 +178,7 @@ void McpManager::onRestartTimer(int serverIdx)
         entry.restartTimer = nullptr;
     }
 
-    startServer(serverIdx, [this, serverIdx](bool ok, QString err) {
+    startServer(serverIdx, [this, serverIdx](bool ok, QString) {
         ServerEntry &e = m_servers[serverIdx];
         QString name = e.client
                        ? e.client->serverName()
@@ -167,11 +216,9 @@ void McpManager::callTool(const QString &name,
     client->callTool(name, arguments, callback);
 }
 
-// ─── buildToolsSystemPrompt ───────────────────────────────────────────────────
-// NEU: fmt-Parameter — gibt format-spezifischen Header aus.
 QString McpManager::buildToolsSystemPrompt(ToolCallFormat::Preset fmt) const
 {
-    QString prompt = toolCallHeader(fmt);  // ← format-spezifisch
+    QString prompt = toolCallHeader(fmt);
     prompt += "\n";
 
     int toolNum = 1;
@@ -191,9 +238,6 @@ QString McpManager::buildToolsSystemPrompt(ToolCallFormat::Preset fmt) const
     return prompt;
 }
 
-// ─── toolCallHeader ───────────────────────────────────────────────────────────
-// NEU: delegiert vollständig an ToolCallFormat::systemPromptHeader().
-// Kein duplizierter Format-String-Code mehr.
 QString McpManager::toolCallHeader(ToolCallFormat::Preset fmt)
 {
     return ToolCallFormat::systemPromptHeader(fmt);
